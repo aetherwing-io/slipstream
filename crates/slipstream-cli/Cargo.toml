@@ -1,0 +1,21 @@
+[package]
+name = "slipstream-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "slipstream"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive", "env"] }
+tokio = { version = "1", features = ["net", "io-util", "macros", "rt"] }
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]
+slipstream-daemon = { path = "../slipstream-daemon" }
+slipstream-core = { path = "../slipstream-core" }
+tempfile = "3"
+uuid = { version = "1", features = ["v4"] }
+tokio = { version = "1", features = ["full", "test-util"] }

@@ -1,0 +1,12 @@
+[package]
+name = "slipstream-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+thiserror = "2"
+parking_lot = "0.12"
+dashmap = "6"
+
+[dev-dependencies]
+tempfile = "3"

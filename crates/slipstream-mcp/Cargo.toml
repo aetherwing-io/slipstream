@@ -1,0 +1,26 @@
+[package]
+name = "slipstream-mcp"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "slipstream-mcp"
+path = "src/main.rs"
+
+[dependencies]
+slipstream-cli = { path = "../slipstream-cli" }
+rmcp = { version = "0.14", features = ["server", "macros", "transport-io"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1"
+thiserror = "2"
+
+[dev-dependencies]
+slipstream-daemon = { path = "../slipstream-daemon" }
+slipstream-core = { path = "../slipstream-core" }
+tempfile = "3"
+uuid = { version = "1", features = ["v4"] }
