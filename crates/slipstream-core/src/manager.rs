@@ -22,6 +22,13 @@ pub enum ManagerError {
 
     #[error("flush error: {0}")]
     Flush(#[from] FlushError),
+
+    #[error("op {index} of {total} failed: {source}")]
+    BatchOpFailed {
+        index: usize,
+        total: usize,
+        source: Box<ManagerError>,
+    },
 }
 
 /// Centralized session lifecycle manager.

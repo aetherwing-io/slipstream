@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use slipstream_core::flush::FlushResult;
-use slipstream_core::manager::SessionManager;
+use slipstream_core::manager::{ManagerError, SessionManager};
 use slipstream_core::session::SessionId;
 
 use crate::coordinator::{Coordinator, CoordinatorError};
@@ -15,6 +15,107 @@ pub const MAX_SESSIONS: usize = 64;
 pub const MAX_FILES_PER_SESSION: usize = 32;
 pub const MAX_BATCH_OPS: usize = 256;
 pub const MAX_CONTENT_LINES_PER_WRITE: usize = 50_000;
+
+// --- Verb dispatch ---
+
+/// Result of executing a single operation verb against a session.
+pub enum OpResult {
+    Read {
+        lines: Vec<String>,
+        cursor: usize,
+    },
+    Write {
+        edits_pending: usize,
+        dirty: Option<(PathBuf, usize)>,
+    },
+    StrReplace {
+        edits_pending: usize,
+        match_line: usize,
+        match_count: usize,
+        dirty: Option<(PathBuf, usize)>,
+    },
+    CursorMove,
+}
+
+impl OpResult {
+    /// Extract dirty file info (canonical path, edits_pending) for coordinator updates.
+    pub fn dirty_info(&self) -> Option<(&Path, usize)> {
+        match self {
+            OpResult::Write { dirty: Some((p, n)), .. } => Some((p, *n)),
+            OpResult::StrReplace { dirty: Some((p, n)), .. } => Some((p, *n)),
+            _ => None,
+        }
+    }
+
+    /// Serialize to JSON for wire response.
+    pub fn to_json(&self) -> serde_json::Value {
+        match self {
+            OpResult::Read { lines, cursor } => {
+                serde_json::json!({"lines": lines, "cursor": cursor})
+            }
+            OpResult::Write { edits_pending, .. } => {
+                serde_json::json!({"edits_pending": edits_pending})
+            }
+            OpResult::StrReplace { edits_pending, match_line, match_count, .. } => {
+                serde_json::json!({"edits_pending": edits_pending, "match_line": match_line, "match_count": match_count})
+            }
+            OpResult::CursorMove => {
+                serde_json::json!({"status": "ok"})
+            }
+        }
+    }
+}
+
+/// Execute a single verb against an already-locked session.
+/// Caller is responsible for: lock acquisition, content-size validation, coordinator side-effects.
+pub fn dispatch_op(
+    session: &mut slipstream_core::session::Session,
+    op: Op,
+    mgr: &SessionManager,
+) -> Result<OpResult, slipstream_core::manager::ManagerError> {
+    match op {
+        Op::Read { path, start, end, count } => {
+            let (lines, cursor) = if let (Some(start), Some(end)) = (start, end) {
+                let lines = session.read(&path, start, end)?;
+                (lines, end)
+            } else if let Some(count) = count {
+                session.read_next(&path, count)?
+            } else {
+                let handle = session.file(&path)?;
+                let lc = handle.line_count()?;
+                let lines = handle.read_range(0, lc)?;
+                (lines, lc)
+            };
+            Ok(OpResult::Read { lines, cursor })
+        }
+        Op::Write { path, start, end, content } => {
+            let count = session.write(&path, start, end, content)?;
+            let dirty = mgr.canonical_path(&path)
+                .ok()
+                .map(|canonical| (canonical, count));
+            Ok(OpResult::Write { edits_pending: count, dirty })
+        }
+        Op::StrReplace { path, old_str, new_str, replace_all } => {
+            let (match_line, match_count, edits_pending) =
+                session.str_replace(&path, &old_str, &new_str, replace_all)?;
+            let dirty = mgr.canonical_path(&path)
+                .ok()
+                .map(|canonical| (canonical, edits_pending));
+            Ok(OpResult::StrReplace { edits_pending, match_line, match_count, dirty })
+        }
+        Op::CursorMove { path, to } => {
+            session.move_cursor(&path, to)?;
+            Ok(OpResult::CursorMove)
+        }
+    }
+}
+
+/// Update coordinator dirty state from an OpResult.
+fn apply_dirty(result: &OpResult, coordinator: &Coordinator) {
+    if let Some((path, edits_pending)) = result.dirty_info() {
+        coordinator.mark_dirty(path, edits_pending);
+    }
+}
 
 /// Dispatch a JSON-RPC request to the appropriate handler.
 pub fn dispatch(
@@ -32,6 +133,7 @@ pub fn dispatch(
         "file.str_replace" => handle_file_str_replace(req, mgr, coordinator),
         "cursor.move" => handle_cursor_move(req, mgr),
         "batch" => handle_batch(req, mgr, coordinator),
+        "session.list" => handle_session_list(req, coordinator),
         "coordinator.status" => handle_coordinator_status(req, coordinator),
         "coordinator.register" => handle_coordinator_register(req, coordinator),
         "coordinator.unregister" => handle_coordinator_unregister(req, coordinator),
@@ -307,7 +409,7 @@ fn handle_session_flush(
     };
 
     match mgr.flush_session(&params.session_id, params.force) {
-        Ok(FlushResult::Ok { files_written }) => {
+        Ok(FlushResult::Ok { files_written, warnings }) => {
             // Mark flushed files in coordinator
             for f in &files_written {
                 let canonical = mgr
@@ -322,11 +424,20 @@ fn handle_session_flush(
                     edits_applied: f.edits_applied,
                 })
                 .collect();
+            let warning_strs: Vec<FlushWarningInfo> = warnings
+                .into_iter()
+                .map(|w| FlushWarningInfo {
+                    path: w.path,
+                    other_session: w.other_session.as_str().to_owned(),
+                    pending_edit_count: w.pending_edit_count,
+                })
+                .collect();
             let resp = Response::ok(
                 req.id,
                 SessionFlushResult {
                     status: "ok".into(),
                     files_written: files,
+                    warnings: warning_strs,
                 },
             );
             inject_digest(resp, coordinator, &cwd(), Some(&params.session_id))
@@ -368,7 +479,7 @@ fn handle_session_close(
 
     match mgr.close_session(&params.session_id) {
         Ok(()) => {
-            coordinator.mark_closed_by_session(&params.session_id);
+            coordinator.remove_closed_by_session(&params.session_id);
             let resp = Response::ok(req.id, serde_json::json!({"status": "closed"}));
             inject_digest(resp, coordinator, &cwd(), Some(&params.session_id))
         }
@@ -382,46 +493,47 @@ fn handle_file_read(mut req: Request, mgr: &Arc<SessionManager>) -> Response {
         Err(resp) => return resp,
     };
 
+    let op = Op::Read {
+        path: params.path.clone(),
+        start: params.start,
+        end: params.end,
+        count: params.count,
+    };
+
     let result = mgr.with_session_mut(&params.session_id, |session| {
-        let (lines, cursor) = if let (Some(start), Some(end)) = (params.start, params.end) {
-            let lines = session.read(&params.path, start, end)?;
-            (lines, end)
-        } else if let Some(count) = params.count {
-            session.read_next(&params.path, count)?
-        } else {
-            let handle = session.file(&params.path)?;
-            let count = handle.line_count()?;
-            let lines = handle.read_range(0, count)?;
-            (lines, count)
-        };
-        Ok((lines, cursor))
+        dispatch_op(session, op, mgr)
     });
 
     match result {
-        Ok((lines, cursor)) => {
-            let canonical = mgr.canonical_path(&params.path);
-            let other_sessions = if let Ok(canonical) = canonical {
-                mgr.other_sessions_info(&params.session_id, &canonical)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|(id, ranges)| OtherSessionInfo {
-                        session: id.as_str().to_owned(),
-                        dirty_ranges: ranges,
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
+        Ok(op_result) => {
+            if let OpResult::Read { lines, cursor } = op_result {
+                // Standalone reads populate other_sessions (batch intentionally skips this)
+                let canonical = mgr.canonical_path(&params.path);
+                let other_sessions = if let Ok(canonical) = canonical {
+                    mgr.other_sessions_info(&params.session_id, &canonical)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|(id, ranges)| OtherSessionInfo {
+                            session: id.as_str().to_owned(),
+                            dirty_ranges: ranges,
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
 
-            // No digest injection on reads
-            Response::ok(
-                req.id,
-                FileReadResult {
-                    lines,
-                    cursor,
-                    other_sessions,
-                },
-            )
+                // No digest injection on reads
+                Response::ok(
+                    req.id,
+                    FileReadResult {
+                        lines,
+                        cursor,
+                        other_sessions,
+                    },
+                )
+            } else {
+                unreachable!("dispatch_op(Op::Read) always returns OpResult::Read")
+            }
         }
         Err(e) => match_manager_error(req.id, params.session_id.as_str(), e),
     }
@@ -447,16 +559,19 @@ fn handle_file_write(
         );
     }
 
+    let op = Op::Write {
+        path: params.path,
+        start: params.start,
+        end: params.end,
+        content: params.content,
+    };
+
     match mgr.with_session_mut(&params.session_id, |session| {
-        let count = session.write(&params.path, params.start, params.end, params.content)?;
-        Ok(count)
+        dispatch_op(session, op, mgr)
     }) {
-        Ok(edits_pending) => {
-            let canonical = mgr
-                .canonical_path(&params.path)
-                .unwrap_or_else(|_| params.path.clone());
-            coordinator.mark_dirty(&canonical, edits_pending);
-            let resp = Response::ok(req.id, FileWriteResult { edits_pending });
+        Ok(op_result) => {
+            apply_dirty(&op_result, coordinator);
+            let resp = Response::ok(req.id, op_result.to_json());
             inject_digest(resp, coordinator, &cwd(), Some(&params.session_id))
         }
         Err(e) => match_manager_error(req.id, params.session_id.as_str(), e),
@@ -473,28 +588,19 @@ fn handle_file_str_replace(
         Err(resp) => return resp,
     };
 
+    let op = Op::StrReplace {
+        path: params.path,
+        old_str: params.old_str,
+        new_str: params.new_str,
+        replace_all: params.replace_all,
+    };
+
     match mgr.with_session_mut(&params.session_id, |session| {
-        let (match_line, match_count, edits_pending) = session.str_replace(
-            &params.path,
-            &params.old_str,
-            &params.new_str,
-            params.replace_all,
-        )?;
-        Ok((match_line, match_count, edits_pending))
+        dispatch_op(session, op, mgr)
     }) {
-        Ok((match_line, match_count, edits_pending)) => {
-            let canonical = mgr
-                .canonical_path(&params.path)
-                .unwrap_or_else(|_| params.path.clone());
-            coordinator.mark_dirty(&canonical, edits_pending);
-            let resp = Response::ok(
-                req.id,
-                FileStrReplaceResult {
-                    edits_pending,
-                    match_line,
-                    match_count,
-                },
-            );
+        Ok(op_result) => {
+            apply_dirty(&op_result, coordinator);
+            let resp = Response::ok(req.id, op_result.to_json());
             inject_digest(resp, coordinator, &cwd(), Some(&params.session_id))
         }
         Err(e) => match_manager_error(req.id, params.session_id.as_str(), e),
@@ -507,11 +613,15 @@ fn handle_cursor_move(mut req: Request, mgr: &Arc<SessionManager>) -> Response {
         Err(resp) => return resp,
     };
 
+    let op = Op::CursorMove {
+        path: params.path,
+        to: params.to,
+    };
+
     match mgr.with_session_mut(&params.session_id, |session| {
-        session.move_cursor(&params.path, params.to)?;
-        Ok(())
+        dispatch_op(session, op, mgr)
     }) {
-        Ok(()) => Response::ok(req.id, serde_json::json!({"status": "ok"})),
+        Ok(op_result) => Response::ok(req.id, op_result.to_json()),
         Err(e) => match_manager_error(req.id, params.session_id.as_str(), e),
     }
 }
@@ -539,80 +649,49 @@ fn handle_batch(
         );
     }
 
-    let had_mutations = ops.iter().any(|op| {
-        matches!(op, BatchOp::Write { .. } | BatchOp::StrReplace { .. })
-    });
-
-    // Track which files were mutated so we can update coordinator state after.
-    // Each entry: (path from the op, edits_pending count).
-    let results: Result<(Vec<serde_json::Value>, Vec<(PathBuf, usize)>), _> =
-        mgr.with_session_mut(&session_id, |session| {
-            let mut results = Vec::with_capacity(ops.len());
-            let mut dirty_files: Vec<(PathBuf, usize)> = Vec::new();
-
-            for op in ops {
-                let value = match op {
-                    BatchOp::Read {
-                        path,
-                        start,
-                        end,
-                        count,
-                    } => {
-                        let (lines, cursor) =
-                            if let (Some(start), Some(end)) = (start, end) {
-                                let lines = session.read(&path, start, end)?;
-                                (lines, end)
-                            } else if let Some(count) = count {
-                                session.read_next(&path, count)?
-                            } else {
-                                let handle = session.file(&path)?;
-                                let lc = handle.line_count()?;
-                                let lines = handle.read_range(0, lc)?;
-                                (lines, lc)
-                            };
-                        serde_json::json!({"lines": lines, "cursor": cursor})
-                    }
-                    BatchOp::Write {
-                        path,
-                        start,
-                        end,
-                        content,
-                    } => {
-                        let count = session.write(&path, start, end, content)?;
-                        dirty_files.push((path, count));
-                        serde_json::json!({"edits_pending": count})
-                    }
-                    BatchOp::StrReplace {
-                        path,
-                        old_str,
-                        new_str,
-                        replace_all,
-                    } => {
-                        let (match_line, match_count, edits_pending) =
-                            session.str_replace(&path, &old_str, &new_str, replace_all)?;
-                        dirty_files.push((path, edits_pending));
-                        serde_json::json!({"edits_pending": edits_pending, "match_line": match_line, "match_count": match_count})
-                    }
-                    BatchOp::CursorMove { path, to } => {
-                        session.move_cursor(&path, to)?;
-                        serde_json::json!({"status": "ok"})
-                    }
-                };
-                results.push(value);
+    // Validate content size limits before entering the session lock
+    for op in &ops {
+        if let Op::Write { content, .. } = op {
+            if content.len() > MAX_CONTENT_LINES_PER_WRITE {
+                return resource_limit_error(
+                    req.id,
+                    format!(
+                        "content too large: {} lines (max {MAX_CONTENT_LINES_PER_WRITE})",
+                        content.len()
+                    ),
+                );
             }
+        }
+    }
 
-            Ok((results, dirty_files))
+    let had_mutations = ops.iter().any(|op| op.is_mutation());
+
+    let op_count = ops.len();
+    let results: Result<Vec<OpResult>, _> =
+        mgr.with_session_mut(&session_id, |session| {
+            let mut results = Vec::with_capacity(op_count);
+            for (idx, op) in ops.into_iter().enumerate() {
+                match dispatch_op(session, op, mgr) {
+                    Ok(result) => results.push(result),
+                    Err(e) => {
+                        return Err(ManagerError::BatchOpFailed {
+                            index: idx,
+                            total: op_count,
+                            source: Box::new(e),
+                        });
+                    }
+                }
+            }
+            Ok(results)
         });
 
     match results {
-        Ok((values, dirty_files)) => {
+        Ok(op_results) => {
             // Update coordinator state for all mutated files
-            for (path, edits_pending) in &dirty_files {
-                let canonical = mgr
-                    .canonical_path(path)
-                    .unwrap_or_else(|_| path.clone());
-                coordinator.mark_dirty(&canonical, *edits_pending);
+            for r in &op_results {
+                apply_dirty(r, coordinator);
             }
+            let values: Vec<serde_json::Value> = op_results.iter().map(|r| r.to_json()).collect();
             let resp = Response::ok(req.id, values);
             if had_mutations {
                 inject_digest(resp, coordinator, &cwd(), Some(&session_id))
@@ -625,6 +704,15 @@ fn handle_batch(
 }
 
 // --- Coordinator handlers ---
+
+fn handle_session_list(req: Request, coordinator: &Arc<Coordinator>) -> Response {
+    let result = coordinator.list_sessions();
+    let val = match serde_json::to_value(result) {
+        Ok(v) => v,
+        Err(e) => return internal_error(req.id, format!("serialization error: {e}")),
+    };
+    Response::ok(req.id, val)
+}
 
 fn handle_coordinator_status(req: Request, coordinator: &Arc<Coordinator>) -> Response {
     let status = coordinator.status();

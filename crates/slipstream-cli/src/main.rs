@@ -107,6 +107,9 @@ enum Command {
         session: String,
     },
 
+    /// List active sessions with file counts
+    List,
+
     /// Execute a batch of operations in a single round trip
     Batch {
         /// Session ID
@@ -140,6 +143,11 @@ enum Command {
         /// Force flush even if conflicts detected
         #[arg(long)]
         force: bool,
+
+        /// Send individual RPC calls per op instead of a single batch call.
+        /// Tests the standalone handler path (both paths call the same dispatch_op).
+        #[arg(long)]
+        no_batch: bool,
     },
 }
 
@@ -240,6 +248,10 @@ async fn run(
             })).await?
         }
 
+        Command::List => {
+            client.request("session.list", serde_json::json!({})).await?
+        }
+
         Command::Batch { session, ops } => {
             let ops_value = parse_ops(&ops)?;
             client.request("batch", serde_json::json!({
@@ -248,8 +260,8 @@ async fn run(
             })).await?
         }
 
-        Command::Exec { files, ops, read_all, flush, force } => {
-            return run_exec(&mut client, files, ops, read_all, flush, force).await;
+        Command::Exec { files, ops, read_all, flush, force, no_batch } => {
+            return run_exec(&mut client, files, ops, read_all, flush, force, no_batch).await;
         }
     };
 
@@ -265,6 +277,7 @@ async fn run_exec(
     read_all: bool,
     flush: bool,
     force: bool,
+    no_batch: bool,
 ) -> Result<(), ClientError> {
     let mut output = serde_json::Map::new();
 
@@ -287,24 +300,57 @@ async fn run_exec(
 
     // 2. Read all files if requested
     if read_all {
-        let read_ops: Vec<serde_json::Value> = paths.iter()
-            .map(|p| serde_json::json!({ "method": "file.read", "path": p }))
-            .collect();
-        let read_result = client.request("batch", serde_json::json!({
-            "session_id": session_id,
-            "ops": read_ops,
-        })).await?;
-        output.insert("read".to_string(), read_result);
+        if no_batch {
+            let mut read_results = Vec::new();
+            for p in &paths {
+                let r = client.request("file.read", serde_json::json!({
+                    "session_id": session_id,
+                    "path": p,
+                })).await?;
+                read_results.push(r);
+            }
+            output.insert("read".to_string(), serde_json::Value::Array(read_results));
+        } else {
+            let read_ops: Vec<serde_json::Value> = paths.iter()
+                .map(|p| serde_json::json!({ "method": "file.read", "path": p }))
+                .collect();
+            let read_result = client.request("batch", serde_json::json!({
+                "session_id": session_id,
+                "ops": read_ops,
+            })).await?;
+            output.insert("read".to_string(), read_result);
+        }
     }
 
     // 3. Apply ops if provided
     if let Some(ops_str) = ops {
         let ops_value = parse_ops(&ops_str)?;
-        let batch_result = client.request("batch", serde_json::json!({
-            "session_id": session_id,
-            "ops": ops_value,
-        })).await?;
-        output.insert("batch".to_string(), batch_result);
+        if no_batch {
+            let ops_array = ops_value.as_array().ok_or_else(|| ClientError::Rpc {
+                code: -1,
+                message: "ops must be a JSON array".to_string(),
+                data: None,
+            })?;
+            let mut op_results = Vec::new();
+            for op in ops_array {
+                let method = op["method"].as_str().ok_or_else(|| ClientError::Rpc {
+                    code: -1,
+                    message: "each op must have a 'method' field".to_string(),
+                    data: None,
+                })?;
+                let mut params = op.clone();
+                params["session_id"] = serde_json::Value::String(session_id.clone());
+                let r = client.request(method, params).await?;
+                op_results.push(r);
+            }
+            output.insert("ops".to_string(), serde_json::Value::Array(op_results));
+        } else {
+            let batch_result = client.request("batch", serde_json::json!({
+                "session_id": session_id,
+                "ops": ops_value,
+            })).await?;
+            output.insert("batch".to_string(), batch_result);
+        }
     }
 
     // 4. Flush if requested

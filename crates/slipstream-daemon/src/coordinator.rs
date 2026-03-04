@@ -109,6 +109,21 @@ pub struct ExternalRegistrationInfo {
 }
 
 #[derive(Debug, Serialize)]
+pub struct SessionListResult {
+    pub sessions: Vec<SessionListEntry>,
+    pub external_count: usize,
+    pub total_sessions: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionListEntry {
+    pub session_id: String,
+    pub file_count: usize,
+    pub dirty_count: usize,
+    pub files: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct CheckResult {
     pub warnings: Vec<String>,
     pub suggestion: String,
@@ -161,10 +176,19 @@ pub struct Coordinator {
 }
 
 fn relative_or_absolute(path: &Path, base: &Path) -> String {
-    pathdiff::diff_paths(path, base)
-        .unwrap_or_else(|| path.to_path_buf())
-        .display()
-        .to_string()
+    let abs = path.display().to_string();
+    match pathdiff::diff_paths(path, base) {
+        Some(rel) => {
+            let rel_str = rel.display().to_string();
+            // Use relative only if it's shorter and doesn't escape too far
+            if rel_str.len() < abs.len() && !rel_str.starts_with("../../..") {
+                rel_str
+            } else {
+                abs
+            }
+        }
+        None => abs,
+    }
 }
 
 impl Coordinator {
@@ -276,16 +300,22 @@ impl Coordinator {
         }
     }
 
-    pub fn mark_closed_by_session(&self, session_id: &SessionId) {
-        for mut entry in self.files.iter_mut() {
-            let matches = match &entry.handler {
+    pub fn remove_closed_by_session(&self, session_id: &SessionId) {
+        // Collect canonical paths to remove (can't modify DashMap while iterating)
+        let to_remove: Vec<(PathBuf, String)> = self
+            .files
+            .iter()
+            .filter(|entry| match &entry.handler {
                 HandlerType::Native { session_id: sid } => sid == session_id,
                 HandlerType::Advisory { session_id: sid, .. } => sid == session_id,
                 HandlerType::External { .. } => false,
-            };
-            if matches {
-                entry.state = FileState::Closed;
-            }
+            })
+            .map(|entry| (entry.key().clone(), entry.tracking_id.clone()))
+            .collect();
+
+        for (canonical, tracking_id) in to_remove {
+            self.files.remove(&canonical);
+            self.tracking_index.remove(&tracking_id);
         }
     }
 
@@ -293,7 +323,7 @@ impl Coordinator {
 
     pub fn on_sessions_swept(&self, expired: &[SessionId]) {
         for sid in expired {
-            self.mark_closed_by_session(sid);
+            self.remove_closed_by_session(sid);
         }
     }
 
@@ -341,7 +371,7 @@ impl Coordinator {
             }
             let state_str = tf.state.to_string();
 
-            let path_str = relative_or_absolute(&tf.canonical_path, cwd);
+            let path_str = relative_or_absolute(&tf.path, cwd);
 
             files.push(DigestEntry {
                 path: path_str,
@@ -475,6 +505,57 @@ impl Coordinator {
             suggestion,
         }
     }
+
+    // Session list
+
+    pub fn list_sessions(&self) -> SessionListResult {
+        let mut session_map: HashMap<String, (Vec<String>, usize)> = HashMap::new();
+        let mut external_count = 0;
+
+        for entry in self.files.iter() {
+            let tf = entry.value();
+            match &tf.handler {
+                HandlerType::Native { session_id } => {
+                    let e = session_map
+                        .entry(session_id.as_str().to_string())
+                        .or_insert_with(|| (Vec::new(), 0));
+                    e.0.push(tf.path.display().to_string());
+                    if matches!(tf.state, FileState::Dirty { .. }) {
+                        e.1 += 1;
+                    }
+                }
+                HandlerType::Advisory { session_id, .. } => {
+                    let e = session_map
+                        .entry(session_id.as_str().to_string())
+                        .or_insert_with(|| (Vec::new(), 0));
+                    e.0.push(tf.path.display().to_string());
+                    if matches!(tf.state, FileState::Dirty { .. }) {
+                        e.1 += 1;
+                    }
+                }
+                HandlerType::External { .. } => {
+                    external_count += 1;
+                }
+            }
+        }
+
+        let total_sessions = session_map.len();
+        let sessions: Vec<SessionListEntry> = session_map
+            .into_iter()
+            .map(|(session_id, (files, dirty_count))| SessionListEntry {
+                session_id,
+                file_count: files.len(),
+                dirty_count,
+                files,
+            })
+            .collect();
+
+        SessionListResult {
+            sessions,
+            external_count,
+            total_sessions,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -577,7 +658,7 @@ mod tests {
     }
 
     #[test]
-    fn test_mark_closed_by_session() {
+    fn test_remove_closed_by_session() {
         let c = Coordinator::new();
         let p1 = tmp_path("close_a1.py");
         let p2 = tmp_path("close_a2.py");
@@ -585,17 +666,14 @@ mod tests {
         c.register_native(&p1, &p1, sid("abc"));
         c.register_native(&p2, &p2, sid("abc"));
         c.register_native(&p3, &p3, sid("xyz"));
-        c.mark_closed_by_session(&sid("abc"));
+        c.remove_closed_by_session(&sid("abc"));
 
-        let status = c.status();
-        for tf in &status.tracked_files {
-            let path_str = tf.canonical_path.display().to_string();
-            if path_str.contains("close_a") {
-                assert!(matches!(tf.state, FileState::Closed), "abc files should be closed");
-            } else if path_str.contains("close_b") {
-                assert!(matches!(tf.state, FileState::Clean), "xyz file should be clean");
-            }
-        }
+        // abc files should be removed entirely, xyz should remain
+        let digest = c.build_digest(Path::new("/tmp"), None);
+        assert_eq!(digest.total_tracked, 1);
+        assert_eq!(digest.native_count, 1);
+        let entry = &digest.files[0];
+        assert!(entry.path.contains("close_b"));
     }
 
     #[test]
@@ -605,8 +683,7 @@ mod tests {
         c.register_native(&p, &p, sid("abc"));
         c.on_sessions_swept(&[sid("abc")]);
         let digest = c.build_digest(Path::new("/tmp"), None);
-        let entry = digest.files.iter().find(|f| f.path.contains("swept")).unwrap();
-        assert_eq!(entry.state, "closed");
+        assert_eq!(digest.total_tracked, 0, "swept session files should be removed");
     }
 
     #[test]
@@ -692,5 +769,31 @@ mod tests {
         assert_eq!(status.tracked_files.len(), 3);
         assert_eq!(status.external_registrations.len(), 1);
         assert_eq!(status.warnings.len(), 1);
+    }
+
+    #[test]
+    fn test_list_sessions() {
+        let c = Coordinator::new();
+        let p1 = tmp_path("list_a1.py");
+        let p2 = tmp_path("list_a2.py");
+        let p3 = tmp_path("list_b1.py");
+        c.register_native(&p1, &p1, sid("s1"));
+        c.register_native(&p2, &p2, sid("s1"));
+        c.register_native(&p3, &p3, sid("s2"));
+        c.mark_dirty(&p1, 3);
+        c.register_external(&tmp_path("list_ext.xlsx"), "sheets")
+            .unwrap();
+
+        let result = c.list_sessions();
+        assert_eq!(result.total_sessions, 2);
+        assert_eq!(result.external_count, 1);
+
+        let s1 = result.sessions.iter().find(|s| s.session_id == "s1").unwrap();
+        assert_eq!(s1.file_count, 2);
+        assert_eq!(s1.dirty_count, 1);
+
+        let s2 = result.sessions.iter().find(|s| s.session_id == "s2").unwrap();
+        assert_eq!(s2.file_count, 1);
+        assert_eq!(s2.dirty_count, 0);
     }
 }

@@ -4,6 +4,7 @@ use rmcp::{transport::stdio, ServiceExt};
 use slipstream_cli::client::default_socket_path;
 
 mod params;
+mod parse;
 mod server;
 
 #[tokio::main]

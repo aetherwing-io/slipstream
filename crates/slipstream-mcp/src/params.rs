@@ -1,98 +1,44 @@
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+/// A single operation item — either a DSL string or a JSON object.
+///
+/// DSL strings are compact for simple ops:
+///   "str_replace f.rs old:\"foo\" new:\"bar\""
+///
+/// JSON objects avoid double-escaping for multi-line content:
+///   {"method": "file.str_replace", "path": "f.rs", "old_str": "multi\nline", "new_str": "replacement"}
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct OpenParams {
-    /// File paths to open in the session
-    pub files: Vec<String>,
+#[serde(untagged)]
+pub enum OpItem {
+    /// DSL string, e.g. "str_replace f.rs old:\"foo\" new:\"bar\""
+    Dsl(String),
+    /// JSON object passed directly to daemon, e.g. {"method": "file.str_replace", "path": "f.rs", ...}
+    Json(serde_json::Value),
 }
 
+/// Parameters for the main `slipstream` tool.
+///
+/// Two modes:
+/// - **One-shot** (`files` provided): open → read? → ops? → flush? → close.
+/// - **Session** (`files` omitted): apply ops to an active named session.
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct ReadParams {
-    /// Session ID from a previous open call
-    pub session_id: String,
-    /// File path to read
-    pub path: String,
-    /// Start line (0-indexed, inclusive). Use with end for range reads.
-    pub start: Option<usize>,
-    /// End line (exclusive). Use with start for range reads.
-    pub end: Option<usize>,
-    /// Number of lines to read from current cursor position
-    pub count: Option<usize>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct WriteParams {
-    /// Session ID from a previous open call
-    pub session_id: String,
-    /// File path to write
-    pub path: String,
-    /// Start line (0-indexed, inclusive)
-    pub start: usize,
-    /// End line (exclusive). Use start==end for insertion.
-    pub end: usize,
-    /// Replacement lines
-    pub content: Vec<String>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct StrReplaceParams {
-    /// Session ID from a previous open call
-    pub session_id: String,
-    /// File path to edit
-    pub path: String,
-    /// The exact text to find (multi-line, must match exactly including whitespace)
-    pub old_str: String,
-    /// The replacement text
-    pub new_str: String,
-    /// Replace all occurrences (default false, requires exactly one match)
-    #[serde(default)]
-    pub replace_all: bool,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct CursorParams {
-    /// Session ID from a previous open call
-    pub session_id: String,
-    /// File path
-    pub path: String,
-    /// Target line number to move cursor to
-    pub to: usize,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct FlushParams {
-    /// Session ID from a previous open call
-    pub session_id: String,
-    /// Force flush even if conflicts are detected
-    #[serde(default)]
-    pub force: bool,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct CloseParams {
-    /// Session ID from a previous open call
-    pub session_id: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct BatchParams {
-    /// Session ID from a previous open call
-    pub session_id: String,
-    /// Array of operations: [{"method": "file.read", "path": "...", ...}, ...]
-    pub ops: serde_json::Value,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct ExecParams {
-    /// File paths to open in the session
-    pub files: Vec<String>,
-    /// Array of operations to apply: [{"method": "file.str_replace", "path": "...", "old_str": "...", "new_str": "..."}, ...]
-    pub ops: Option<serde_json::Value>,
-    /// Read all opened files before applying ops
+pub struct SlipstreamParams {
+    /// File paths — if provided, creates a one-shot session (auto open+close).
+    /// Omit to operate on the active session from slipstream_session('open ...').
+    pub files: Option<Vec<String>>,
+    /// Named session to operate on (default: "default").
+    /// Only meaningful when files is omitted (session mode).
+    pub session: Option<String>,
+    /// Batch operations — each item is either a DSL string or a JSON object.
+    /// DSL strings: "str_replace f.rs old:\"foo\" new:\"bar\"", "read f.rs start:10 end:20"
+    /// JSON objects: {"method": "file.str_replace", "path": "f.rs", "old_str": "multi\nline", "new_str": "new"}
+    /// Both formats can be mixed in the same array. Use JSON for multi-line content to avoid double-escaping.
+    pub ops: Option<Vec<OpItem>>,
+    /// Read all files before applying ops
     #[serde(default)]
     pub read_all: bool,
-    /// Flush edits to disk after applying ops
+    /// Flush edits to disk after ops
     #[serde(default)]
     pub flush: bool,
     /// Force flush even if conflicts detected
@@ -100,27 +46,29 @@ pub struct ExecParams {
     pub force: bool,
 }
 
+/// Parameters for `slipstream_session` — lifecycle actions.
+///
+/// Actions: open, flush, close, register, unregister.
+/// Examples: "open src/main.rs", "open data.csv as:worker-1", "flush", "close session:worker-1"
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct StatusParams {
-    // intentionally empty — no parameters needed
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct RegisterParams {
-    /// Absolute or relative path of the externally-managed file
-    pub path: String,
-    /// Handler name (e.g. "sheets", "drawio", "midi", "terraform")
-    pub handler: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct UnregisterParams {
-    /// Tracking ID returned by slipstream_register or session.open
-    pub tracking_id: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct CheckParams {
-    /// Action to pre-flight check. Currently only "build" is supported.
+pub struct SessionActionParams {
+    /// Lifecycle action string.
+    /// Examples: "open src/main.rs src/lib.rs", "open f.rs as:worker-1",
+    /// "flush", "flush --force", "flush session:worker-1",
+    /// "close", "close session:worker-1",
+    /// "register /path/file.xlsx sheets", "unregister ext-001"
     pub action: String,
+}
+
+/// Parameters for `slipstream_query` — read-only queries.
+///
+/// Queries: read, status, list, check.
+/// Examples: "read src/main.rs", "read src/main.rs start:10 end:20", "status", "list", "check build"
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct QueryParams {
+    /// Query string.
+    /// Examples: "read src/main.rs", "read src/main.rs start:10 end:20",
+    /// "read src/main.rs count:50", "read src/main.rs session:worker-1",
+    /// "status", "list", "check build"
+    pub q: String,
 }

@@ -21,6 +21,14 @@ pub struct FlushConflict {
     pub by_session: SessionId,
 }
 
+/// Warning about another session's pending edits on a flushed file.
+#[derive(Debug)]
+pub struct FlushWarning {
+    pub path: PathBuf,
+    pub other_session: SessionId,
+    pub pending_edit_count: usize,
+}
+
 /// Result of a flush operation.
 #[must_use]
 #[derive(Debug)]
@@ -28,6 +36,7 @@ pub enum FlushResult {
     /// All files flushed successfully.
     Ok {
         files_written: Vec<FileFlushResult>,
+        warnings: Vec<FlushWarning>,
     },
     /// Some files had conflicts (no files were written).
     Conflict {
@@ -165,8 +174,25 @@ pub fn flush_session(
         });
     }
 
+    // Build warnings: other sessions with pending edits on files we just flushed
+    let mut warnings = Vec::new();
+    let flushed_paths: Vec<&PathBuf> = results.iter().map(|r| &r.path).collect();
+    for path in &flushed_paths {
+        if let Some(other_sessions) = other_edits.get(*path) {
+            for other in other_sessions {
+                if !other.edits.is_empty() {
+                    warnings.push(FlushWarning {
+                        path: (*path).clone(),
+                        other_session: other.session_id.clone(),
+                        pending_edit_count: other.edits.len(),
+                    });
+                }
+            }
+        }
+    }
+
     session.status = SessionStatus::Open;
-    Ok(FlushResult::Ok { files_written: results })
+    Ok(FlushResult::Ok { files_written: results, warnings })
 }
 
 /// Write lines to a file atomically while computing the FNV-1a hash simultaneously.
@@ -244,7 +270,7 @@ mod tests {
 
         let result = flush_session(&mut session, &HashMap::new(), false).unwrap();
         match result {
-            FlushResult::Ok { files_written } => {
+            FlushResult::Ok { files_written, .. } => {
                 assert_eq!(files_written.len(), 1);
                 assert_eq!(files_written[0].edits_applied, 1);
             }
@@ -367,7 +393,7 @@ mod tests {
 
         let result = flush_session(&mut session, &other_edits, true).unwrap();
         match result {
-            FlushResult::Ok { files_written } => {
+            FlushResult::Ok { files_written, .. } => {
                 assert_eq!(files_written.len(), 1);
             }
             FlushResult::Conflict { .. } => panic!("expected force to succeed"),
@@ -385,7 +411,7 @@ mod tests {
 
         let result = flush_session(&mut session, &HashMap::new(), false).unwrap();
         match result {
-            FlushResult::Ok { files_written } => {
+            FlushResult::Ok { files_written, .. } => {
                 assert!(files_written.is_empty());
             }
             FlushResult::Conflict { .. } => panic!("unexpected conflict"),
@@ -478,5 +504,54 @@ mod tests {
 
         // Edits should still be pending
         assert_eq!(session.file(f.path()).unwrap().pending_edit_count(), 1);
+    }
+
+    #[test]
+    fn flush_warns_about_other_sessions_pending_edits() {
+        let f = temp_file("a\nb\nc\nd\ne\n");
+        let pool = BufferPool::new();
+        let mut session = Session::open("s1".into(), &[f.path()], &pool).unwrap();
+
+        // Our edit on lines 0..1
+        session.write(f.path(), 0, 1, vec!["A".into()]).unwrap();
+
+        // Other session has pending edits on lines 3..4 (no overlap, no conflict)
+        let canonical = std::fs::canonicalize(f.path()).unwrap();
+        let mut other_edits = HashMap::new();
+        other_edits.insert(
+            canonical,
+            vec![OtherSessionEdits {
+                session_id: "s2".into(),
+                edits: vec![Edit::new(3, 4, vec!["D".into()])],
+            }],
+        );
+
+        let result = flush_session(&mut session, &other_edits, false).unwrap();
+        match result {
+            FlushResult::Ok { files_written, warnings } => {
+                assert_eq!(files_written.len(), 1);
+                assert_eq!(warnings.len(), 1);
+                assert_eq!(warnings[0].other_session, "s2");
+                assert_eq!(warnings[0].pending_edit_count, 1);
+            }
+            FlushResult::Conflict { .. } => panic!("expected ok with warnings"),
+        }
+    }
+
+    #[test]
+    fn flush_no_warnings_when_no_other_sessions() {
+        let f = temp_file("a\nb\nc\n");
+        let pool = BufferPool::new();
+        let mut session = Session::open("s1".into(), &[f.path()], &pool).unwrap();
+
+        session.write(f.path(), 0, 1, vec!["A".into()]).unwrap();
+
+        let result = flush_session(&mut session, &HashMap::new(), false).unwrap();
+        match result {
+            FlushResult::Ok { warnings, .. } => {
+                assert!(warnings.is_empty());
+            }
+            FlushResult::Conflict { .. } => panic!("expected ok"),
+        }
     }
 }

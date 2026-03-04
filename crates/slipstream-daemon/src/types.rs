@@ -35,6 +35,15 @@ pub struct SessionFlushParams {
 pub struct SessionFlushResult {
     pub status: String,
     pub files_written: Vec<FileWrittenInfo>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<FlushWarningInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FlushWarningInfo {
+    pub path: PathBuf,
+    pub other_session: String,
+    pub pending_edit_count: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -126,12 +135,12 @@ pub struct CursorMoveParams {
 #[derive(Debug, Deserialize)]
 pub struct BatchParams {
     pub session_id: SessionId,
-    pub ops: Vec<BatchOp>,
+    pub ops: Vec<Op>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "method")]
-pub enum BatchOp {
+pub enum Op {
     #[serde(rename = "file.read")]
     Read {
         path: PathBuf,
@@ -162,6 +171,12 @@ pub enum BatchOp {
         path: PathBuf,
         to: usize,
     },
+}
+
+impl Op {
+    pub fn is_mutation(&self) -> bool {
+        matches!(self, Op::Write { .. } | Op::StrReplace { .. })
+    }
 }
 
 // --- Conflict error data ---

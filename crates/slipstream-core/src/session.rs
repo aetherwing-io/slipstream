@@ -255,7 +255,7 @@ impl Session {
         Ok(handle.pending_edit_count())
     }
 
-    /// String-match replace: find `old_str` in buffer, queue edit to replace with `new_str`.
+    /// String-match replace: find `old_str` as a substring in buffer, queue edit to replace with `new_str`.
     /// Requires exactly one match unless `replace_all` is true.
     /// Returns (match_start_line, match_count, edits_pending).
     pub fn str_replace(
@@ -274,7 +274,7 @@ impl Session {
         let handle = self.file_mut(path)?;
         let buf = handle.buffer.read();
         let result = str_match::find_str_in_lines(&buf.lines, old_str);
-        let match_count = result.positions.len();
+        let match_count = result.matches.len();
 
         if match_count == 0 {
             return Err(StrReplaceError::NoMatch.into());
@@ -283,18 +283,22 @@ impl Session {
             return Err(StrReplaceError::AmbiguousMatch { count: match_count }.into());
         }
 
-        let old_line_count = str_match::needle_line_count(old_str);
-        let new_lines = str_match::split_new_text(new_str);
+        let first_match = result.matches[0].start_line;
 
         // Queue from bottom-up so positions don't shift during apply_edits
-        let mut positions = result.positions;
-        let first_match = positions[0];
-        positions.sort_unstable_by(|a, b| b.cmp(a));
+        let mut matches = result.matches;
+        matches.sort_unstable_by(|a, b| b.start_line.cmp(&a.start_line));
+
+        // Compute replacements while we still hold the read lock
+        let replacements: Vec<_> = matches
+            .iter()
+            .map(|m| str_match::compute_replacement(&buf.lines, m, new_str))
+            .collect();
 
         drop(buf); // release read lock before mutating edits
 
-        for start in &positions {
-            handle.queue_edit(*start, *start + old_line_count, new_lines.clone());
+        for (start, end, new_lines) in replacements {
+            handle.queue_edit(start, end, new_lines);
         }
 
         Ok((first_match, match_count, handle.pending_edit_count()))
