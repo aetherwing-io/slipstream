@@ -4,12 +4,14 @@ use std::sync::Arc;
 use std::time::Instant;
 use parking_lot::RwLock;
 
+use serde::Serialize;
+
 use crate::buffer::{BufferPool, BufferError, FileBuffer};
 use crate::edit::Edit;
 use crate::str_match::{self, StrReplaceError};
 
 /// Unique session identifier (newtype for type safety).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct SessionId(String);
 
 impl SessionId {

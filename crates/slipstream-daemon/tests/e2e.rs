@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use slipstream_core::manager::SessionManager;
+use slipstream_daemon::coordinator::Coordinator;
+use slipstream_daemon::registry::FormatRegistry;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
@@ -65,7 +67,9 @@ fn start_server(mgr: Arc<SessionManager>) -> PathBuf {
     let _ = std::fs::remove_file(&socket_path);
 
     let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
-    tokio::spawn(slipstream_daemon::serve(listener, mgr));
+    let registry = Arc::new(FormatRegistry::default_registry());
+    let coordinator = Arc::new(Coordinator::new());
+    tokio::spawn(slipstream_daemon::serve(listener, mgr, registry, coordinator));
 
     socket_path
 }
@@ -210,5 +214,391 @@ async fn e2e_batch_mixed_ops() {
     assert_eq!(results[2]["cursor"].as_u64().unwrap(), 5);
 
     // Cleanup
+    let _ = std::fs::remove_file(&sock);
+}
+
+// --- Format-aware open + coordinator E2E tests ---
+
+/// Start server and return (socket_path, coordinator) for tests that need coordinator access.
+fn start_server_with_coord(
+    mgr: Arc<SessionManager>,
+) -> (PathBuf, Arc<Coordinator>) {
+    let socket_path = PathBuf::from(format!(
+        "/tmp/ss-{}.sock",
+        &uuid::Uuid::new_v4().to_string()[..8]
+    ));
+    let _ = std::fs::remove_file(&socket_path);
+
+    let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+    let registry = Arc::new(FormatRegistry::default_registry());
+    let coordinator = Arc::new(Coordinator::new());
+    let coord_ref = Arc::clone(&coordinator);
+    tokio::spawn(slipstream_daemon::serve(listener, mgr, registry, coordinator));
+
+    (socket_path, coord_ref)
+}
+
+#[tokio::test]
+async fn e2e_format_aware_open_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("hello.rs");
+    std::fs::write(&file, "fn main() {}\n").unwrap();
+
+    let mgr = Arc::new(SessionManager::new());
+    let (sock, _coord) = start_server_with_coord(Arc::clone(&mgr));
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+    let mut client = TestClient::connect(&sock).await;
+    let resp = client
+        .request("session.open", serde_json::json!({"files": [file.to_str().unwrap()]}))
+        .await;
+
+    let result = &resp["result"];
+    assert!(result["session_id"].as_str().is_some());
+    assert!(result.get("session_digest").is_some());
+    assert_eq!(result["session_digest"]["native_count"], 1);
+
+    let _ = std::fs::remove_file(&sock);
+}
+
+#[tokio::test]
+async fn e2e_format_aware_open_external() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("report.xlsx");
+    std::fs::write(&file, "").unwrap();
+
+    let mgr = Arc::new(SessionManager::new());
+    let (sock, _coord) = start_server_with_coord(Arc::clone(&mgr));
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+    let mut client = TestClient::connect(&sock).await;
+    let resp = client
+        .request("session.open", serde_json::json!({"files": [file.to_str().unwrap()]}))
+        .await;
+
+    let result = &resp["result"];
+    let arr = result.as_array().unwrap();
+    assert_eq!(arr[0]["status"], "external_handler");
+    assert_eq!(arr[0]["handler"], "sheets");
+    assert!(arr[0]["tracking_id"].as_str().unwrap().starts_with("ext-"));
+    assert!(arr[0]["instructions"]["open"]
+        .as_str()
+        .unwrap()
+        .contains(&file.display().to_string()));
+
+    let _ = std::fs::remove_file(&sock);
+}
+
+#[tokio::test]
+async fn e2e_format_aware_open_advisory() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("Makefile");
+    std::fs::write(&file, "all:\n\techo hi\n").unwrap();
+
+    let mgr = Arc::new(SessionManager::new());
+    let (sock, _coord) = start_server_with_coord(Arc::clone(&mgr));
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+    let mut client = TestClient::connect(&sock).await;
+    let resp = client
+        .request("session.open", serde_json::json!({"files": [file.to_str().unwrap()]}))
+        .await;
+
+    let result = &resp["result"];
+    assert_eq!(result["status"], "advisory");
+    assert_eq!(result["loaded_as_text"], true);
+    assert!(result["guidance"]
+        .as_str()
+        .unwrap()
+        .to_lowercase()
+        .contains("make"));
+
+    let sid = result["session_id"].as_str().unwrap();
+    let read_resp = client
+        .request(
+            "file.read",
+            serde_json::json!({
+                "session_id": sid,
+                "path": file.to_str().unwrap(),
+            }),
+        )
+        .await;
+    let lines = read_resp["result"]["lines"].as_array().unwrap();
+    assert!(!lines.is_empty());
+
+    let _ = std::fs::remove_file(&sock);
+}
+
+#[tokio::test]
+async fn e2e_coordinator_register_and_status() {
+    let mgr = Arc::new(SessionManager::new());
+    let (sock, _coord) = start_server_with_coord(Arc::clone(&mgr));
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+    let mut client = TestClient::connect(&sock).await;
+
+    let resp = client
+        .request(
+            "coordinator.register",
+            serde_json::json!({"path": "/some/fake.xlsx", "handler": "sheets"}),
+        )
+        .await;
+    let result = &resp["result"];
+    assert!(result["tracking_id"].as_str().is_some());
+
+    let status_resp = client
+        .request("coordinator.status", serde_json::json!({}))
+        .await;
+    let ext = status_resp["result"]["external_registrations"]
+        .as_array()
+        .unwrap();
+    assert_eq!(ext.len(), 1);
+    assert_eq!(ext[0]["handler"], "sheets");
+
+    let _ = std::fs::remove_file(&sock);
+}
+
+#[tokio::test]
+async fn e2e_coordinator_check_dirty() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("dirty.txt");
+    std::fs::write(&file, "data\n").unwrap();
+
+    let mgr = Arc::new(SessionManager::new());
+    let (sock, _coord) = start_server_with_coord(Arc::clone(&mgr));
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+    let mut client = TestClient::connect(&sock).await;
+    let sid = client.open_session(&[&file]).await;
+
+    client
+        .request(
+            "file.write",
+            serde_json::json!({
+                "session_id": sid,
+                "path": file.to_str().unwrap(),
+                "start": 0, "end": 1,
+                "content": ["modified"]
+            }),
+        )
+        .await;
+
+    let resp = client
+        .request("coordinator.check", serde_json::json!({"action": "build"}))
+        .await;
+    let result = &resp["result"];
+    let warnings = result["warnings"].as_array().unwrap();
+    assert!(!warnings.is_empty());
+    assert!(result["suggestion"]
+        .as_str()
+        .unwrap()
+        .to_lowercase()
+        .contains("flush"));
+
+    let _ = std::fs::remove_file(&sock);
+}
+
+#[tokio::test]
+async fn e2e_coordinator_check_clean_after_flush() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("clean.txt");
+    std::fs::write(&file, "data\n").unwrap();
+
+    let mgr = Arc::new(SessionManager::new());
+    let (sock, _coord) = start_server_with_coord(Arc::clone(&mgr));
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+    let mut client = TestClient::connect(&sock).await;
+    let sid = client.open_session(&[&file]).await;
+
+    client
+        .request(
+            "file.write",
+            serde_json::json!({
+                "session_id": sid,
+                "path": file.to_str().unwrap(),
+                "start": 0, "end": 1,
+                "content": ["changed"]
+            }),
+        )
+        .await;
+
+    client
+        .request("session.flush", serde_json::json!({"session_id": sid}))
+        .await;
+
+    let resp = client
+        .request("coordinator.check", serde_json::json!({"action": "build"}))
+        .await;
+    let result = &resp["result"];
+    let warnings = result["warnings"].as_array().unwrap();
+    assert!(warnings.is_empty());
+    assert_eq!(result["suggestion"], "Ready to build");
+
+    let _ = std::fs::remove_file(&sock);
+}
+
+#[tokio::test]
+async fn e2e_digest_on_write_response() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("wr.txt");
+    std::fs::write(&file, "line\n").unwrap();
+
+    let mgr = Arc::new(SessionManager::new());
+    let (sock, _coord) = start_server_with_coord(Arc::clone(&mgr));
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+    let mut client = TestClient::connect(&sock).await;
+    let sid = client.open_session(&[&file]).await;
+
+    let resp = client
+        .request(
+            "file.write",
+            serde_json::json!({
+                "session_id": sid,
+                "path": file.to_str().unwrap(),
+                "start": 0, "end": 1,
+                "content": ["new"]
+            }),
+        )
+        .await;
+    let result = &resp["result"];
+    assert!(result.get("session_digest").is_some());
+    assert_eq!(result["session_digest"]["native_dirty"], 1);
+
+    let _ = std::fs::remove_file(&sock);
+}
+
+#[tokio::test]
+async fn e2e_digest_not_on_read_response() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("rd.txt");
+    std::fs::write(&file, "content\n").unwrap();
+
+    let mgr = Arc::new(SessionManager::new());
+    let (sock, _coord) = start_server_with_coord(Arc::clone(&mgr));
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+    let mut client = TestClient::connect(&sock).await;
+    let sid = client.open_session(&[&file]).await;
+
+    let resp = client
+        .request(
+            "file.read",
+            serde_json::json!({
+                "session_id": sid,
+                "path": file.to_str().unwrap(),
+                "start": 0, "end": 1
+            }),
+        )
+        .await;
+    let result = &resp["result"];
+    assert!(result.get("session_digest").is_none());
+
+    let _ = std::fs::remove_file(&sock);
+}
+
+#[tokio::test]
+async fn e2e_coordinator_unregister() {
+    let mgr = Arc::new(SessionManager::new());
+    let (sock, _coord) = start_server_with_coord(Arc::clone(&mgr));
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+    let mut client = TestClient::connect(&sock).await;
+
+    let resp = client
+        .request(
+            "coordinator.register",
+            serde_json::json!({"path": "/tmp/unreg.xlsx", "handler": "sheets"}),
+        )
+        .await;
+    let tid = resp["result"]["tracking_id"].as_str().unwrap().to_string();
+
+    client
+        .request(
+            "coordinator.unregister",
+            serde_json::json!({"tracking_id": tid}),
+        )
+        .await;
+
+    let status_resp = client
+        .request("coordinator.status", serde_json::json!({}))
+        .await;
+    let ext = status_resp["result"]["external_registrations"]
+        .as_array()
+        .unwrap();
+    assert!(ext.is_empty());
+
+    let _ = std::fs::remove_file(&sock);
+}
+
+#[tokio::test]
+async fn e2e_full_coordinator_workflow() {
+    let dir = tempfile::tempdir().unwrap();
+    let py_file = dir.path().join("app.py");
+    std::fs::write(&py_file, "x = 1\n").unwrap();
+
+    let mgr = Arc::new(SessionManager::new());
+    let (sock, _coord) = start_server_with_coord(Arc::clone(&mgr));
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+    let mut client = TestClient::connect(&sock).await;
+
+    // 1. Open native text file
+    let sid = client.open_session(&[&py_file]).await;
+
+    // 2. Register external xlsx
+    let reg_resp = client
+        .request(
+            "coordinator.register",
+            serde_json::json!({"path": "/tmp/workflow.xlsx", "handler": "sheets"}),
+        )
+        .await;
+    let tid = reg_resp["result"]["tracking_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // 3. Write to native file (makes it dirty)
+    client
+        .request(
+            "file.write",
+            serde_json::json!({
+                "session_id": sid,
+                "path": py_file.to_str().unwrap(),
+                "start": 0, "end": 1,
+                "content": ["x = 2"]
+            }),
+        )
+        .await;
+
+    // 4. Check build → expect 2 warnings (dirty native + external)
+    let check_resp = client
+        .request("coordinator.check", serde_json::json!({"action": "build"}))
+        .await;
+    let warnings = check_resp["result"]["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 2, "expected 2 warnings: {warnings:?}");
+
+    // 5. Flush native session
+    client
+        .request("session.flush", serde_json::json!({"session_id": sid}))
+        .await;
+
+    // 6. Unregister external
+    client
+        .request(
+            "coordinator.unregister",
+            serde_json::json!({"tracking_id": tid}),
+        )
+        .await;
+
+    // 7. Check build again → clean
+    let check_resp = client
+        .request("coordinator.check", serde_json::json!({"action": "build"}))
+        .await;
+    let warnings = check_resp["result"]["warnings"].as_array().unwrap();
+    assert!(warnings.is_empty());
+    assert_eq!(check_resp["result"]["suggestion"], "Ready to build");
+
     let _ = std::fs::remove_file(&sock);
 }

@@ -99,3 +99,28 @@ pub struct ExecParams {
     #[serde(default)]
     pub force: bool,
 }
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct StatusParams {
+    // intentionally empty — no parameters needed
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RegisterParams {
+    /// Absolute or relative path of the externally-managed file
+    pub path: String,
+    /// Handler name (e.g. "sheets", "drawio", "midi", "terraform")
+    pub handler: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct UnregisterParams {
+    /// Tracking ID returned by slipstream_register or session.open
+    pub tracking_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CheckParams {
+    /// Action to pre-flight check. Currently only "build" is supported.
+    pub action: String,
+}

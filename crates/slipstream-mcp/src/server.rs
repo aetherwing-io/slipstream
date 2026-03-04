@@ -241,6 +241,73 @@ impl SlipstreamServer {
         to_tool_result(result)
     }
 
+    #[tool(description = "Get full coordinator status: all tracked files, pending edits, external registrations, and warnings. Use after context compaction to recover file state.")]
+    async fn slipstream_status(
+        &self,
+        Parameters(_p): Parameters<StatusParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut inner = self.inner.lock().await;
+        let result = match inner.ensure_connected().await {
+            Ok(client) => client
+                .request("coordinator.status", serde_json::json!({}))
+                .await,
+            Err(e) => Err(e),
+        };
+        to_tool_result(result)
+    }
+
+    #[tool(description = "Register an externally-managed file with the coordinator. Call this after opening a file in an FCP server (sheets, drawio, midi, terraform) so slipstream can track its state.")]
+    async fn slipstream_register(
+        &self,
+        Parameters(p): Parameters<RegisterParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut inner = self.inner.lock().await;
+        let result = match inner.ensure_connected().await {
+            Ok(client) => client
+                .request("coordinator.register", serde_json::json!({
+                    "path": p.path,
+                    "handler": p.handler,
+                }))
+                .await,
+            Err(e) => Err(e),
+        };
+        to_tool_result(result)
+    }
+
+    #[tool(description = "Remove an externally-managed file from coordinator tracking. Call this after the external tool has saved and closed the file.")]
+    async fn slipstream_unregister(
+        &self,
+        Parameters(p): Parameters<UnregisterParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut inner = self.inner.lock().await;
+        let result = match inner.ensure_connected().await {
+            Ok(client) => client
+                .request("coordinator.unregister", serde_json::json!({
+                    "tracking_id": p.tracking_id,
+                }))
+                .await,
+            Err(e) => Err(e),
+        };
+        to_tool_result(result)
+    }
+
+    #[tool(description = "Pre-flight check before an action. Use action=\"build\" to check if all files are saved. Returns warnings (unflushed native edits, unsaved external files) and a suggestion.")]
+    async fn slipstream_check(
+        &self,
+        Parameters(p): Parameters<CheckParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut inner = self.inner.lock().await;
+        let result = match inner.ensure_connected().await {
+            Ok(client) => client
+                .request("coordinator.check", serde_json::json!({
+                    "action": p.action,
+                }))
+                .await,
+            Err(e) => Err(e),
+        };
+        to_tool_result(result)
+    }
+
     #[tool(description = "All-in-one: open files, optionally read them, apply batch operations, optionally flush to disk, and close. Combines open+batch+flush+close into a single tool call. Use read_all=true to get file contents. Pass ops as an array of file.str_replace/file.read/file.write operations. Use flush=true to write changes to disk.")]
     async fn slipstream_exec(
         &self,
@@ -343,11 +410,13 @@ impl ServerHandler for SlipstreamServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(
-                "Slipstream provides in-memory file editing with session isolation and conflict detection. \
-                 Open a session -> read/write files -> flush to disk -> close session. \
-                 IMPORTANT: Use slipstream_str_replace (or file.str_replace in batch) for all edits. \
-                 It matches exact text without line numbers, avoiding off-by-one errors. \
-                 Only use slipstream_write for insertions at a known position.".into()
+                "Slipstream is a file session coordinator. It tracks all files across native text editing and external format handlers (FCP servers for .xlsx, .drawio, .mid, .tf). \
+                 Open files with slipstream_open — for native text files (py, rs, ts, etc.), you get a session_id for editing. \
+                 For external formats (xlsx, drawio, mid, tf), you get guidance on which FCP tool to use. \
+                 IMPORTANT: Use slipstream_str_replace (or file.str_replace in batch) for all text edits — it matches exact text without line numbers. \
+                 After opening external files in their FCP tool, call slipstream_register to track them. \
+                 Before running a build, call slipstream_check(action=\"build\") to verify all files are saved. \
+                 Call slipstream_status at any time to see the full state of all tracked files.".into()
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             ..Default::default()

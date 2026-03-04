@@ -9,6 +9,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use slipstream_core::manager::SessionManager;
+use slipstream_daemon::coordinator::Coordinator;
+use slipstream_daemon::registry::FormatRegistry;
 use slipstream_mcp::server::SlipstreamServer;
 use tokio::net::UnixListener;
 
@@ -21,7 +23,9 @@ fn start_server(mgr: Arc<SessionManager>) -> PathBuf {
     let _ = std::fs::remove_file(&socket_path);
 
     let listener = UnixListener::bind(&socket_path).unwrap();
-    tokio::spawn(slipstream_daemon::serve(listener, mgr));
+    let registry = Arc::new(FormatRegistry::default_registry());
+    let coordinator = Arc::new(Coordinator::new());
+    tokio::spawn(slipstream_daemon::serve(listener, mgr, registry, coordinator));
 
     socket_path
 }
@@ -308,6 +312,126 @@ async fn read_variants() {
         .map(|v| v.as_str().unwrap())
         .collect();
     assert_eq!(lines, vec!["a", "b", "c", "d", "e"]);
+
+    let _ = std::fs::remove_file(&sock);
+}
+
+// --- Coordinator MCP tool tests ---
+
+#[tokio::test]
+async fn mcp_new_tools_registered() {
+    let (_server, mut client, sock, _dir) = setup().await;
+
+    // coordinator.status
+    let result = client
+        .request("coordinator.status", serde_json::json!({}))
+        .await;
+    assert!(result.is_ok(), "status should succeed");
+
+    // coordinator.register
+    let result = client
+        .request(
+            "coordinator.register",
+            serde_json::json!({"path": "/some/file.xlsx", "handler": "sheets"}),
+        )
+        .await
+        .unwrap();
+    let tid = result["tracking_id"].as_str().unwrap().to_string();
+
+    // coordinator.unregister
+    let result = client
+        .request(
+            "coordinator.unregister",
+            serde_json::json!({"tracking_id": tid}),
+        )
+        .await;
+    assert!(result.is_ok(), "unregister should succeed");
+
+    // coordinator.check
+    let result = client
+        .request(
+            "coordinator.check",
+            serde_json::json!({"action": "build"}),
+        )
+        .await;
+    assert!(result.is_ok(), "check should succeed");
+
+    let _ = std::fs::remove_file(&sock);
+}
+
+#[tokio::test]
+async fn mcp_register_and_check() {
+    let (_server, mut client, sock, _dir) = setup().await;
+
+    // Register external file
+    let result = client
+        .request(
+            "coordinator.register",
+            serde_json::json!({"path": "/tmp/mcp_test.xlsx", "handler": "sheets"}),
+        )
+        .await
+        .unwrap();
+    let tid = result["tracking_id"].as_str().unwrap().to_string();
+
+    // Check → should warn about external file
+    let result = client
+        .request("coordinator.check", serde_json::json!({"action": "build"}))
+        .await
+        .unwrap();
+    let warnings = result["warnings"].as_array().unwrap();
+    assert!(!warnings.is_empty());
+
+    // Unregister
+    client
+        .request(
+            "coordinator.unregister",
+            serde_json::json!({"tracking_id": tid}),
+        )
+        .await
+        .unwrap();
+
+    // Check again → clean
+    let result = client
+        .request("coordinator.check", serde_json::json!({"action": "build"}))
+        .await
+        .unwrap();
+    let warnings = result["warnings"].as_array().unwrap();
+    assert!(warnings.is_empty());
+
+    let _ = std::fs::remove_file(&sock);
+}
+
+#[tokio::test]
+async fn mcp_open_returns_digest() {
+    let (_server, mut client, sock, dir) = setup().await;
+    let file = dir.path().join("digest_test.txt");
+    std::fs::write(&file, "hello\n").unwrap();
+
+    let result = client
+        .request(
+            "session.open",
+            serde_json::json!({"files": [file.to_str().unwrap()]}),
+        )
+        .await
+        .unwrap();
+    assert!(result.get("session_digest").is_some());
+    assert!(result["session_digest"]["total_tracked"].as_u64().unwrap() >= 1);
+
+    let _ = std::fs::remove_file(&sock);
+}
+
+#[tokio::test]
+async fn mcp_status_returns_all_fields() {
+    let (_server, mut client, sock, _dir) = setup().await;
+
+    let result = client
+        .request("coordinator.status", serde_json::json!({}))
+        .await
+        .unwrap();
+    assert!(result["tracked_files"].as_array().is_some());
+    assert!(result["native_sessions"].as_array().is_some());
+    assert!(result["external_registrations"].as_array().is_some());
+    assert!(result["warnings"].as_array().is_some());
 
     let _ = std::fs::remove_file(&sock);
 }

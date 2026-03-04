@@ -4,7 +4,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use slipstream_core::manager::SessionManager;
-use slipstream_daemon;
+use slipstream_daemon::coordinator::Coordinator;
+use slipstream_daemon::registry::FormatRegistry;
 use tokio::net::UnixListener;
 
 /// Start an in-process daemon on a temp socket, return the socket path.
@@ -16,7 +17,9 @@ fn start_server(mgr: Arc<SessionManager>) -> PathBuf {
     let _ = std::fs::remove_file(&socket_path);
 
     let listener = UnixListener::bind(&socket_path).unwrap();
-    tokio::spawn(slipstream_daemon::serve(listener, mgr));
+    let registry = Arc::new(FormatRegistry::default_registry());
+    let coordinator = Arc::new(Coordinator::new());
+    tokio::spawn(slipstream_daemon::serve(listener, mgr, registry, coordinator));
 
     socket_path
 }

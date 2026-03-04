@@ -173,3 +173,60 @@ pub struct ConflictData {
     pub by_session: String,
     pub hint: String,
 }
+
+// --- session.open external/advisory results ---
+
+#[derive(Debug, Serialize)]
+pub struct ExternalHandlerResult {
+    pub status: String,
+    pub path: String,
+    pub handler: String,
+    pub description: String,
+    pub instructions: HandlerInstructions,
+    pub tracking_id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HandlerInstructions {
+    pub open: String,
+    pub save: String,
+    pub help: String,
+    pub examples: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AdvisoryOpenResult {
+    pub status: String,
+    pub path: String,
+    pub handler: String,
+    pub guidance: String,
+    pub loaded_as_text: bool,
+}
+
+// --- coordinator.register ---
+
+#[derive(Debug, Deserialize)]
+pub struct CoordinatorRegisterParams {
+    pub path: String,
+    pub handler: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CoordinatorRegisterResult {
+    pub tracking_id: String,
+    pub status: String,
+}
+
+// --- coordinator.unregister ---
+
+#[derive(Debug, Deserialize)]
+pub struct CoordinatorUnregisterParams {
+    pub tracking_id: String,
+}
+
+// --- coordinator.check ---
+
+#[derive(Debug, Deserialize)]
+pub struct CoordinatorCheckParams {
+    pub action: String,
+}

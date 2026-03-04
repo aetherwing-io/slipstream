@@ -2,6 +2,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use slipstream_core::manager::SessionManager;
+use slipstream_daemon::coordinator::Coordinator;
+use slipstream_daemon::registry::FormatRegistry;
 use tokio::net::UnixListener;
 
 /// Default socket path.
@@ -45,20 +47,26 @@ async fn main() {
     tracing::info!("listening on {}", socket_path.display());
 
     let mgr = Arc::new(SessionManager::new());
+    let registry = Arc::new(FormatRegistry::default_registry());
+    let coordinator = Arc::new(Coordinator::new());
 
     // Spawn session sweeper (periodic cleanup of expired sessions)
     let sweep_mgr = Arc::clone(&mgr);
+    let sweep_coord = Arc::clone(&coordinator);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
         loop {
             interval.tick().await;
             if let Ok(expired) = sweep_mgr.sweep_expired() {
-                for id in &expired {
-                    tracing::info!("expired session: {id}");
+                if !expired.is_empty() {
+                    sweep_coord.on_sessions_swept(&expired);
+                    for id in &expired {
+                        tracing::info!("expired session: {id}");
+                    }
                 }
             }
         }
     });
 
-    slipstream_daemon::serve(listener, mgr).await;
+    slipstream_daemon::serve(listener, mgr, registry, coordinator).await;
 }
