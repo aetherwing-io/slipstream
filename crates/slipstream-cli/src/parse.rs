@@ -522,6 +522,39 @@ fn parse_opt_usize(kwargs: &HashMap<String, String>, key: &str) -> Result<Option
         .map_err(|_| format!("invalid {key} value"))
 }
 
+/// Normalize a mixed DSL/JSON ops array into daemon wire format.
+///
+/// Each element in the input array can be:
+/// - A JSON string → parsed as DSL (e.g. `"str_replace f.rs old:\"foo\" new:\"bar\""`)
+/// - A JSON object → validated to have a `"method"` field, passed through
+///
+/// Returns a JSON array where every element is a daemon-wire-format JSON object
+/// with `"method"`, `"path"`, and operation-specific fields.
+pub fn normalize_ops(ops: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let arr = ops
+        .as_array()
+        .ok_or_else(|| "ops must be a JSON array".to_string())?;
+    let mut out = Vec::with_capacity(arr.len());
+    for (i, item) in arr.iter().enumerate() {
+        match item {
+            serde_json::Value::String(dsl) => match parse_op(dsl) {
+                Ok(op) => out.push(op.to_json()),
+                Err(e) => return Err(format!("op {i}: {e}")),
+            },
+            serde_json::Value::Object(_) => {
+                if !item.get("method").and_then(|v| v.as_str()).is_some() {
+                    return Err(format!(
+                        "op {i}: JSON object must have a \"method\" string field"
+                    ));
+                }
+                out.push(item.clone());
+            }
+            _ => return Err(format!("op {i}: expected string (DSL) or object (JSON)")),
+        }
+    }
+    Ok(serde_json::Value::Array(out))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -974,5 +1007,79 @@ mod tests {
             new_str: "bar".into(),
             replace_all: false,
         });
+    }
+
+    // --- normalize_ops tests ---
+
+    #[test]
+    fn normalize_dsl_strings() {
+        let input = serde_json::json!([
+            r#"str_replace f.rs old:"foo" new:"bar""#,
+            r#"read f.rs start:10 end:20"#,
+        ]);
+        let result = normalize_ops(&input).unwrap();
+        let arr = result.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["method"], "file.str_replace");
+        assert_eq!(arr[0]["old_str"], "foo");
+        assert_eq!(arr[0]["new_str"], "bar");
+        assert_eq!(arr[1]["method"], "file.read");
+        assert_eq!(arr[1]["start"], 10);
+    }
+
+    #[test]
+    fn normalize_json_objects() {
+        let input = serde_json::json!([
+            {"method": "file.write", "path": "f.rs", "start": 0, "end": 0, "content": ["line1"]},
+        ]);
+        let result = normalize_ops(&input).unwrap();
+        let arr = result.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["method"], "file.write");
+        assert_eq!(arr[0]["content"], serde_json::json!(["line1"]));
+    }
+
+    #[test]
+    fn normalize_mixed_dsl_and_json() {
+        let input = serde_json::json!([
+            r#"str_replace f.rs old:"foo" new:"bar" replace_all"#,
+            {"method": "file.write", "path": "f.rs", "start": 0, "end": 0, "content": ["x"]},
+        ]);
+        let result = normalize_ops(&input).unwrap();
+        let arr = result.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["method"], "file.str_replace");
+        assert!(arr[0]["replace_all"].as_bool().unwrap());
+        assert_eq!(arr[1]["method"], "file.write");
+    }
+
+    #[test]
+    fn normalize_rejects_json_without_method() {
+        let input = serde_json::json!([
+            {"path": "f.rs", "old_str": "foo", "new_str": "bar"},
+        ]);
+        let err = normalize_ops(&input).unwrap_err();
+        assert!(err.contains("method"));
+    }
+
+    #[test]
+    fn normalize_rejects_non_array() {
+        let input = serde_json::json!({"method": "file.read"});
+        let err = normalize_ops(&input).unwrap_err();
+        assert!(err.contains("array"));
+    }
+
+    #[test]
+    fn normalize_rejects_bad_element_type() {
+        let input = serde_json::json!([42]);
+        let err = normalize_ops(&input).unwrap_err();
+        assert!(err.contains("expected string"));
+    }
+
+    #[test]
+    fn normalize_reports_dsl_parse_errors() {
+        let input = serde_json::json!(["unknown_verb f.rs"]);
+        let err = normalize_ops(&input).unwrap_err();
+        assert!(err.contains("op 0"));
     }
 }

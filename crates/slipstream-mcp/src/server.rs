@@ -15,7 +15,7 @@ use tokio::sync::Mutex;
 use slipstream_cli::client::{Client, ClientError};
 
 use crate::params::*;
-use crate::parse::{self, Query, SessionAction};
+use slipstream_cli::parse::{self, Query, SessionAction};
 
 /// Inner state: connection config + optional connected client + named sessions.
 struct Inner {
@@ -224,25 +224,19 @@ slipstream_session("close session:agent-b")
 "#;
 
 /// Parse mixed DSL/JSON op items into JSON values for the daemon batch protocol.
+///
+/// Converts `OpItem`s to a JSON array, then delegates to the shared
+/// `normalize_ops` in `slipstream_cli::parse`.
 fn parse_ops(items: &[crate::params::OpItem]) -> Result<serde_json::Value, String> {
     use crate::params::OpItem;
-    let mut json_ops = Vec::with_capacity(items.len());
-    for (i, item) in items.iter().enumerate() {
-        match item {
-            OpItem::Dsl(dsl) => match parse::parse_op(dsl) {
-                Ok(op) => json_ops.push(op.to_json()),
-                Err(e) => return Err(format!("op {i}: {e}")),
-            },
-            OpItem::Json(obj) => {
-                // Validate that the JSON object has a "method" field
-                if !obj.get("method").and_then(|v| v.as_str()).is_some() {
-                    return Err(format!("op {i}: JSON object must have a \"method\" string field"));
-                }
-                json_ops.push(obj.clone());
-            }
-        }
-    }
-    Ok(serde_json::Value::Array(json_ops))
+    let json_array: Vec<serde_json::Value> = items
+        .iter()
+        .map(|item| match item {
+            OpItem::Dsl(dsl) => serde_json::Value::String(dsl.clone()),
+            OpItem::Json(obj) => obj.clone(),
+        })
+        .collect();
+    parse::normalize_ops(&serde_json::Value::Array(json_array))
 }
 
 #[tool_router]

@@ -380,16 +380,22 @@ fn read_stdin_lines() -> Vec<String> {
 }
 
 fn parse_ops(input: &str) -> Result<serde_json::Value, ClientError> {
-    if input == "@-" {
+    let raw = if input == "@-" {
         // Read from stdin
         let contents = std::io::read_to_string(std::io::stdin())
             .map_err(ClientError::Io)?;
-        Ok(serde_json::from_str(&contents)?)
+        serde_json::from_str(&contents)?
     } else if let Some(path) = input.strip_prefix('@') {
         let contents = std::fs::read_to_string(path)
             .map_err(|e| ClientError::Io(std::io::Error::new(e.kind(), format!("{path}: {e}"))))?;
-        Ok(serde_json::from_str(&contents)?)
+        serde_json::from_str(&contents)?
     } else {
-        Ok(serde_json::from_str(input)?)
-    }
+        serde_json::from_str(input)?
+    };
+    // Normalize mixed DSL/JSON ops into daemon wire format
+    slipstream_cli::parse::normalize_ops(&raw).map_err(|e| ClientError::Rpc {
+        code: -32602,
+        message: e,
+        data: None,
+    })
 }
