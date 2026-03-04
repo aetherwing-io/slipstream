@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640">
+  <defs>
+    <linearGradient id="undertow" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0ea5a8"/>
+      <stop offset="40%" stop-color="#14b8a6"/>
+      <stop offset="100%" stop-color="#38bdf8"/>
+    </linearGradient>
+    <radialGradient id="glow-tr" cx="85%" cy="15%" r="25%">
+      <stop offset="0%" stop-color="rgba(14,165,168,0.12)"/>
+      <stop offset="100%" stop-color="rgba(14,165,168,0)"/>
+    </radialGradient>
+    <radialGradient id="glow-bl" cx="15%" cy="85%" r="22%">
+      <stop offset="0%" stop-color="rgba(56,189,248,0.08)"/>
+      <stop offset="100%" stop-color="rgba(56,189,248,0)"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1280" height="640" fill="#09090b"/>
+
+  <!-- Atmospheric orbs -->
+  <circle cx="1050" cy="120" r="300" fill="url(#glow-tr)"/>
+  <circle cx="230" cy="520" r="250" fill="url(#glow-bl)"/>
+
+  <!-- Wordmark -->
+  <text x="640" y="260" text-anchor="middle" font-family="'SF Mono', 'Fira Code', 'Cascadia Code', 'JetBrains Mono', monospace" font-size="72" font-weight="700" fill="url(#undertow)">s//slipstream</text>
+
+  <!-- Tagline -->
+  <text x="640" y="320" text-anchor="middle" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="24" fill="#8888a0" font-weight="400">the in-memory editing daemon</text>
+
+  <!-- Feature pills -->
+  <g transform="translate(640, 400)">
+    <!-- Pill 1: one-shot edits -->
+    <g transform="translate(-440, 0)">
+      <rect x="0" y="-20" width="180" height="40" rx="20" fill="#16161d" stroke="#2a2a38" stroke-width="1.5"/>
+      <text x="90" y="6" text-anchor="middle" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" fill="#c4c4d4">one-shot edits</text>
+    </g>
+    <!-- Pill 2: batch ops -->
+    <g transform="translate(-210, 0)">
+      <rect x="0" y="-20" width="150" height="40" rx="20" fill="#16161d" stroke="#2a2a38" stroke-width="1.5"/>
+      <text x="75" y="6" text-anchor="middle" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" fill="#c4c4d4">batch ops</text>
+    </g>
+    <!-- Pill 3: conflict detection -->
+    <g transform="translate(-10, 0)">
+      <rect x="0" y="-20" width="195" height="40" rx="20" fill="#16161d" stroke="#2a2a38" stroke-width="1.5"/>
+      <text x="97" y="6" text-anchor="middle" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" fill="#c4c4d4">conflict detection</text>
+    </g>
+    <!-- Pill 4: atomic flush -->
+    <g transform="translate(235, 0)">
+      <rect x="0" y="-20" width="170" height="40" rx="20" fill="#16161d" stroke="#2a2a38" stroke-width="1.5"/>
+      <text x="85" y="6" text-anchor="middle" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" fill="#c4c4d4">atomic flush</text>
+    </g>
+  </g>
+
+  <!-- Footer -->
+  <text x="640" y="580" text-anchor="middle" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" fill="#55556a" font-weight="400">aetherwing.io</text>
+</svg>
