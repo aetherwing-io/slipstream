@@ -2,13 +2,13 @@
 
 In-memory file editing daemon for LLM agent workflows. Reduces serial file I/O round trips from 10+ to 2-3 via batch operations over a Unix socket.
 
-**Status: Completed experiment.** Benchmarks showed the approach works correctly but doesn't provide meaningful speedups at typical editing scales. See [Benchmark Results](#benchmark-results) for details.
-
 ## The Problem
 
 LLM coding agents (Claude Code, multi-agent orchestrators) spend most of their latency budget on serial file I/O — each read and edit is a full LLM inference round trip (~1-3s). A 5-file refactor can burn 10+ turns just on file operations.
 
 Slipstream provides a persistent background daemon that preloads files into memory, lets agents batch reads and writes in a single tool call, and atomically flushes all changes on session close.
+
+**Status: Completed experiment.** Benchmarks showed the approach works correctly but doesn't provide meaningful speedups at typical editing scales. See [Benchmark Results](#benchmark-results) for details.
 
 ## Architecture
 
@@ -117,7 +117,7 @@ Task: apply 8 realistic edits (security fixes, feature wiring, config changes) a
 
 Each tool call in a real LLM agent workflow costs ~1-3s of inference latency (the model has to process the response and decide the next action). Slipstream eliminates 17 of those round trips, which translates to **~17-51s saved per editing task** in practice.
 
-The raw wall time is higher (3.68ms vs 0.31ms) because of daemon overhead — but that's irrelevant. In a real agent loop, wall time is dominated by LLM inference, not filesystem I/O. What matters is the number of times the LLM has to stop and think.
+The raw wall time is higher (3.68ms vs 0.31ms) because of daemon overhead. In a real agent loop though, wall time is dominated by LLM inference, not filesystem I/O — so the metric that matters is how many times the LLM has to stop and think, not how fast the filesystem responds.
 
 ### Why It's Still an Experiment
 
@@ -135,19 +135,39 @@ Despite the tool call reduction, Slipstream isn't practical for most use cases b
 
 Run the benchmark yourself: `python3 docs/benchmark.py`
 
+## Quick Start
+
+```bash
+# Start the MCP server
+./target/release/slipstream-mcp
+```
+
+For Claude Code:
+
+```bash
+claude mcp add slipstream -- ./target/release/slipstream-mcp
+```
+
+For other MCP clients:
+
+```json
+{
+  "mcpServers": {
+    "slipstream": {
+      "command": "/path/to/slipstream-mcp"
+    }
+  }
+}
+```
+
+Then use the tools: `slipstream_session("open src/main.rs src/lib.rs")` → `slipstream(ops=[...])` → `slipstream_session("flush")`.
+
 ## Building
 
 ```bash
 cargo build --release
+cargo test  # 118 tests across all crates
 ```
-
-## Testing
-
-```bash
-cargo test
-```
-
-118 tests across all crates.
 
 ## License
 

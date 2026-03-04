@@ -1717,4 +1717,40 @@ mod tests {
         assert!(content.contains("REPLACED"));
         assert!(!content.contains("target_word"));
     }
+
+    #[test]
+    fn batch_write_accepts_lines_alias() {
+        // file.write should accept "lines" as an alias for "content"
+        let f = temp_file("original\n");
+        let (sid, mgr, reg, coord) = open_session(&[&f]);
+
+        let req = make_request(
+            "batch",
+            serde_json::json!({
+                "session_id": sid,
+                "ops": [
+                    {
+                        "method": "file.write",
+                        "path": f.path(),
+                        "start": 0,
+                        "end": 1,
+                        "lines": ["replaced via lines alias"]
+                    }
+                ]
+            }),
+        );
+        let resp = dispatch(req, &mgr, &reg, &coord);
+        let results = result_ok(&resp);
+        let arr = results.as_array().unwrap();
+        assert_eq!(arr[0]["edits_pending"].as_u64().unwrap(), 1);
+
+        let flush_req = make_request(
+            "session.flush",
+            serde_json::json!({"session_id": sid}),
+        );
+        dispatch(flush_req, &mgr, &reg, &coord);
+
+        let content = std::fs::read_to_string(f.path()).unwrap();
+        assert!(content.contains("replaced via lines alias"));
+    }
 }

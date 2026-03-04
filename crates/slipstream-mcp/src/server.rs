@@ -86,54 +86,93 @@ fn err_result(msg: String) -> Result<CallToolResult, McpError> {
 
 const HELP_TEXT: &str = r#"# Slipstream Reference Card
 
-## slipstream — main operations
+## Quick Start — One-Shot Edit (most common pattern)
 
-Two modes:
-- **One-shot** (`files` provided): open → read? → ops? → flush? → close
-- **Session** (`files` omitted): apply ops to active named session
-
-### Ops format (DSL strings and/or JSON objects — mix freely)
-
-**DSL strings** — compact, great for single-line ops:
+Edit files and flush to disk in a single call:
 ```
-ops: [
+slipstream(
+  files=["src/main.rs", "src/lib.rs"],
+  ops=[
+    {"method": "file.str_replace", "path": "src/main.rs", "old_str": "foo", "new_str": "bar"},
+    {"method": "file.str_replace", "path": "src/lib.rs", "old_str": "old_name", "new_str": "new_name", "replace_all": true}
+  ],
+  flush=true
+)
+```
+
+Read files first, then edit:
+```
+slipstream(
+  files=["src/main.rs"],
+  read_all=true,
+  ops=[{"method": "file.str_replace", "path": "src/main.rs", "old_str": "before", "new_str": "after"}],
+  flush=true
+)
+```
+
+## JSON Op Reference (all 4 verbs)
+
+### file.str_replace — find and replace text (substring match)
+```json
+{"method": "file.str_replace", "path": "f.rs", "old_str": "foo", "new_str": "bar"}
+{"method": "file.str_replace", "path": "f.rs", "old_str": "foo", "new_str": "bar", "replace_all": true}
+{"method": "file.str_replace", "path": "f.rs", "old_str": "line1\nline2", "new_str": "new1\nnew2\nnew3"}
+```
+- `old_str`: text to find (substring — no need for full lines)
+- `new_str`: replacement text
+- `replace_all`: replace every occurrence (default: false, errors if >1 match)
+
+### file.write — insert or replace lines by position
+```json
+{"method": "file.write", "path": "f.rs", "start": 0, "end": 0, "content": ["// header line"]}
+{"method": "file.write", "path": "f.rs", "start": 5, "end": 8, "content": ["replacement"]}
+```
+- `start`/`end`: line range [start, end) — 0-indexed
+- `start == end`: insert at that line (no lines removed)
+- `content`: array of strings, one per line (also accepts `"lines"` as field name)
+
+### file.read — read lines
+```json
+{"method": "file.read", "path": "f.rs"}
+{"method": "file.read", "path": "f.rs", "start": 10, "end": 30}
+{"method": "file.read", "path": "f.rs", "count": 50}
+```
+
+### cursor.move — set read cursor position
+```json
+{"method": "cursor.move", "path": "f.rs", "to": 100}
+```
+
+## Two-Phase Batching
+
+When a batch contains both str_replace and replace_all ops on the same file, Slipstream automatically runs them in two phases:
+1. Non-replace_all ops execute first (edits queued on original buffer)
+2. replace_all ops run against the materialized result
+
+This means you can safely mix insertions and renames in one batch:
+```
+ops=[
+  {"method": "file.str_replace", "path": "f.rs", "old_str": "import { foo }", "new_str": "// header\nimport { bar }"},
+  {"method": "file.str_replace", "path": "f.rs", "old_str": "foo", "new_str": "bar", "replace_all": true}
+]
+```
+The replace_all sees the result of the first edit — no ordering issues.
+
+## DSL Shorthand (alternative to JSON)
+
+For simple ops, use DSL strings instead of JSON objects. Mix freely in the same array.
+```
+ops=[
   "str_replace f.rs old:\"foo\" new:\"bar\"",
-  "str_replace f.rs old:\"old\" new:\"new\" replace_all",
-  "read f.rs",
-  "read f.rs start:0 end:20",
-  "read f.rs count:50",
+  "str_replace f.rs old:\"x\" new:\"y\" replace_all",
   "write f.rs start:0 end:0 content:\"// header\"",
+  "read f.rs start:0 end:20",
   "cursor f.rs to:50"
 ]
 ```
+Escape sequences: `\n` → newline, `\\` → backslash, `\"` → quote.
 
-**JSON objects** — use for multi-line content (avoids double-escaping):
-```
-ops: [
-  {"method": "file.str_replace", "path": "f.rs", "old_str": "fn foo(\n    x: i32\n)", "new_str": "fn bar(\n    x: i64\n)"},
-  {"method": "file.read", "path": "f.rs", "start": 0, "end": 20}
-]
-```
-
-**Mixed** — combine both in one array:
-```
-ops: [
-  "read f.rs",
-  {"method": "file.str_replace", "path": "f.rs", "old_str": "multi\nline\ncontent", "new_str": "replacement"},
-  "str_replace f.rs old:\"simple\" new:\"change\""
-]
-```
-
-**Note**: str_replace uses substring matching — `old:"dispatch_op"` matches within `pub fn dispatch_op(`. No need to include the full line.
-
-### DSL escape sequences
-- `\n` → newline (for multi-line old/new strings)
-- `\\` → literal backslash
-- `\"` → literal quote
-
-### When to use which format
-- **DSL**: simple single-line replacements (80% of edits)
-- **JSON**: multi-line content, special characters, or when content already has backslashes/quotes
+**When to use which**: JSON for multi-line content or special characters. DSL for quick single-line edits.
 
 ## slipstream_session — lifecycle
 
@@ -154,45 +193,33 @@ ops: [
 | read full | `read src/main.rs` |
 | read range | `read src/main.rs start:10 end:20` |
 | read cursor | `read src/main.rs count:50` |
-| read named | `read src/main.rs session:worker-1` |
 | status | `status` |
 | list | `list` |
-| check | `check build` |
+| check build | `check build` |
 
-Note: `read` auto-opens files not in the session — no need to `open` first for reads.
+Note: `read` auto-opens files not in the session — no need to `open` first.
 
-## Common Workflows
+## Session Workflows
 
-**One-shot edit** (most common):
-```
-slipstream(files=["f.rs"], read_all=true, ops=["str_replace f.rs old:\"foo\" new:\"bar\""], flush=true)
-```
-
-**Multi-turn session**:
+**Multi-turn session** (when you need to read before editing):
 ```
 slipstream_session("open src/main.rs src/lib.rs")
-slipstream_query("read src/main.rs")
-slipstream(ops=["str_replace src/main.rs old:\"foo\" new:\"bar\""])
+slipstream_query("read src/main.rs start:0 end:50")
+slipstream(ops=[{"method": "file.str_replace", "path": "src/main.rs", "old_str": "foo", "new_str": "bar"}])
 slipstream_session("flush")
 slipstream_session("close")
 ```
 
-**Concurrent subagents**:
+**Concurrent named sessions**:
 ```
-Agent A: slipstream_session("open f1.rs as:a")
-Agent B: slipstream_session("open f2.rs as:b")
-Agent A: slipstream(session="a", ops=["str_replace f1.rs old:\"x\" new:\"y\""])
-Agent B: slipstream(session="b", ops=["str_replace f2.rs old:\"x\" new:\"y\""])
-Both:    slipstream_session("flush session:a"), slipstream_session("flush session:b")
-Both:    slipstream_session("close session:a"), slipstream_session("close session:b")
-```
-
-**External files** (FCP coordination):
-```
-slipstream_session("register /path/file.xlsx sheets")
-# ... use sheets tool to edit ...
-slipstream_query("status")
-slipstream_session("unregister ext-001")
+slipstream_session("open f1.rs as:agent-a")
+slipstream_session("open f2.rs as:agent-b")
+slipstream(session="agent-a", ops=[...])
+slipstream(session="agent-b", ops=[...])
+slipstream_session("flush session:agent-a")
+slipstream_session("flush session:agent-b")
+slipstream_session("close session:agent-a")
+slipstream_session("close session:agent-b")
 ```
 "#;
 
@@ -245,7 +272,7 @@ impl SlipstreamServer {
         }
     }
 
-    #[tool(description = "File editing operations. Two modes: (1) One-shot with files=[...] — auto open/close, self-contained. (2) Session mode (files omitted) — ops run on active session. Ops accept DSL strings or JSON objects (mix freely): DSL: \"str_replace f.rs old:\\\"foo\\\" new:\\\"bar\\\"\". JSON: {\"method\": \"file.str_replace\", \"path\": \"f.rs\", \"old_str\": \"multi\\nline\", \"new_str\": \"new\"}. Use JSON for multi-line content to avoid double-escaping. Verbs: str_replace, read, write, cursor. Use read_all=true to get file contents, flush=true to write to disk.")]
+    #[tool(description = "File editing operations. Two modes: (1) One-shot with files=[...] — auto open/close, self-contained. (2) Session mode (files omitted) — ops run on active session. Ops are JSON objects or DSL strings (mix freely). JSON examples: {\"method\": \"file.str_replace\", \"path\": \"f.rs\", \"old_str\": \"foo\", \"new_str\": \"bar\"} — add \"replace_all\": true to replace all occurrences. {\"method\": \"file.write\", \"path\": \"f.rs\", \"start\": 0, \"end\": 0, \"content\": [\"inserted line\"]} — start==end inserts, start<end replaces. {\"method\": \"file.read\", \"path\": \"f.rs\", \"start\": 0, \"end\": 20}. Use read_all=true to get file contents, flush=true to write to disk.")]
     async fn slipstream(
         &self,
         Parameters(p): Parameters<SlipstreamParams>,

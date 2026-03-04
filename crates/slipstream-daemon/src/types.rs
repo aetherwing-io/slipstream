@@ -156,6 +156,7 @@ pub enum Op {
         path: PathBuf,
         start: usize,
         end: usize,
+        #[serde(alias = "lines")]
         content: Vec<String>,
     },
     #[serde(rename = "file.str_replace")]
