@@ -160,6 +160,11 @@ impl FormatRegistry {
 
     /// Look up extension (no leading dot, lowercased) → Option<&HandlerEntry>.
     pub fn lookup_ext(&self, ext: &str) -> Option<&HandlerEntry> {
+        // Fast path: most extensions are already lowercase
+        if let Some(entry) = self.ext_map.get(ext).and_then(|name| self.handlers.get(name)) {
+            return Some(entry);
+        }
+        // Slow path: case-insensitive fallback
         let lower = ext.to_lowercase();
         self.ext_map.get(&lower).and_then(|name| self.handlers.get(name))
     }

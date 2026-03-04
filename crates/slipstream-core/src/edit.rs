@@ -61,18 +61,6 @@ pub fn find_conflicts(edits_a: &[Edit], edits_b: &[Edit]) -> Vec<(usize, usize)>
     conflicts
 }
 
-/// Check if any edits in two lists conflict.
-pub fn has_conflicts(edits_a: &[Edit], edits_b: &[Edit]) -> bool {
-    for a in edits_a {
-        for b in edits_b {
-            if ranges_overlap(a.range(), b.range()) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 /// Sort edits bottom-up (highest start line first) for safe application
 /// without offset cascading. Secondary sort by end (descending) for determinism
 /// when multiple edits share a start line.
@@ -179,20 +167,6 @@ mod tests {
         ];
         let conflicts = find_conflicts(&a, &b);
         assert_eq!(conflicts, vec![(0, 0), (1, 1)]);
-    }
-
-    #[test]
-    fn has_conflicts_true() {
-        let a = vec![Edit::new(0, 5, vec!["a".into()])];
-        let b = vec![Edit::new(3, 8, vec!["b".into()])];
-        assert!(has_conflicts(&a, &b));
-    }
-
-    #[test]
-    fn has_conflicts_false() {
-        let a = vec![Edit::new(0, 5, vec!["a".into()])];
-        let b = vec![Edit::new(5, 10, vec!["b".into()])];
-        assert!(!has_conflicts(&a, &b));
     }
 
     // --- sort_bottom_up tests ---

@@ -8,6 +8,4 @@ serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 parking_lot = "0.12"
 dashmap = "6"
-
-[dev-dependencies]
 tempfile = "3"

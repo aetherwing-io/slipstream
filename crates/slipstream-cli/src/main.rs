@@ -341,7 +341,7 @@ fn parse_ops(input: &str) -> Result<serde_json::Value, ClientError> {
         Ok(serde_json::from_str(&contents)?)
     } else if let Some(path) = input.strip_prefix('@') {
         let contents = std::fs::read_to_string(path)
-            .map_err(|e| ClientError::Io(e))?;
+            .map_err(|e| ClientError::Io(std::io::Error::new(e.kind(), format!("{path}: {e}"))))?;
         Ok(serde_json::from_str(&contents)?)
     } else {
         Ok(serde_json::from_str(input)?)

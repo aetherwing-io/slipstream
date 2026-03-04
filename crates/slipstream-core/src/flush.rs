@@ -62,15 +62,6 @@ pub struct OtherSessionEdits {
 ///    e. Write to disk atomically (temp + rename)
 ///    f. Increment version, update disk_hash
 /// 2. If any conflicts found and not force: return conflicts, write nothing
-pub fn flush(
-    session: &mut Session,
-    other_edits: &HashMap<PathBuf, Vec<OtherSessionEdits>>,
-    force: bool,
-) -> Result<FlushResult, FlushError> {
-    flush_session(session, other_edits, force)
-}
-
-/// Flush all pending edits from a session to disk (internal implementation).
 pub fn flush_session(
     session: &mut Session,
     other_edits: &HashMap<PathBuf, Vec<OtherSessionEdits>>,
@@ -139,24 +130,34 @@ pub fn flush_session(
     for (path, mut edits) in files_to_write {
         let handle = session.files.get_mut(&path)
             .expect("files_to_write was built from session.files");
-        let mut buf = handle.buffer.write();
 
         let edit_count = edits.len();
 
-        // Sort bottom-up to avoid offset cascading
-        edit::sort_bottom_up(&mut edits);
+        // Phase 2a: Apply edits under write lock, snapshot the result, then release
+        let (snapshot_lines, snapshot_trailing, file_path) = {
+            let mut buf = handle.buffer.write();
 
-        // Apply edits to buffer (takes ownership to avoid cloning)
-        edit::apply_edits(&mut buf.lines, edits);
+            // Sort bottom-up to avoid offset cascading
+            edit::sort_bottom_up(&mut edits);
 
-        // Stream lines to disk while computing hash simultaneously
-        buf.disk_hash = atomic_write_and_hash(&buf.path, &buf.lines, buf.trailing_newline)?;
+            // Apply edits to buffer (takes ownership to avoid cloning)
+            edit::apply_edits(&mut buf.lines, edits);
 
-        // Update buffer state
-        buf.version += 1;
+            (buf.lines.clone(), buf.trailing_newline, buf.path.clone())
+        }; // write lock released here
 
-        // Update handle snapshot
-        handle.snapshot_version = buf.version;
+        // Phase 2b: Write snapshot to disk without holding any lock (slow I/O)
+        let new_hash = atomic_write_and_hash(&file_path, &snapshot_lines, snapshot_trailing)?;
+
+        // Phase 2c: Reacquire write lock to update metadata (fast)
+        {
+            let mut buf = handle.buffer.write();
+            buf.disk_hash = new_hash;
+            buf.version += 1;
+        }
+
+        // Update handle snapshot (read current version)
+        handle.snapshot_version = handle.buffer.read().version;
 
         results.push(FileFlushResult {
             path: path.clone(),
@@ -170,17 +171,24 @@ pub fn flush_session(
 
 /// Write lines to a file atomically while computing the FNV-1a hash simultaneously.
 /// This avoids the intermediate String allocation of `reconstruct()` + separate hash.
+///
+/// Uses `tempfile::NamedTempFile` for safe temp file handling:
+/// - Auto-cleans on drop (no leaked temp files on write failure)
+/// - Uses `O_CREAT|O_EXCL` (unpredictable name, no TOCTOU race)
+/// - `persist()` does atomic rename
 fn atomic_write_and_hash(path: &Path, lines: &[String], trailing_newline: bool) -> Result<u64, FlushError> {
     use std::io::{BufWriter, Write};
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    use tempfile::NamedTempFile;
 
-    let parent = path.parent().unwrap_or(std::path::Path::new("."));
-    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let temp_path = parent.join(format!(".slipstream-tmp-{}-{}", std::process::id(), seq));
+    let parent = path.parent().unwrap_or(Path::new("."));
+    let temp = NamedTempFile::new_in(parent).map_err(FlushError::Io)?;
 
-    let file = std::fs::File::create(&temp_path)?;
-    let mut writer = BufWriter::new(file);
+    // Preserve permissions of the target file if it exists
+    if let Ok(meta) = std::fs::metadata(path) {
+        let _ = temp.as_file().set_permissions(meta.permissions());
+    }
+
+    let mut writer = BufWriter::new(&temp);
     let mut hash: u64 = 0xcbf29ce484222325;
 
     for (i, line) in lines.iter().enumerate() {
@@ -201,13 +209,11 @@ fn atomic_write_and_hash(path: &Path, lines: &[String], trailing_newline: bool) 
         hash = hash.wrapping_mul(0x100000001b3);
     }
 
-    writer.flush()?;
+    writer.flush().map_err(FlushError::Io)?;
     drop(writer);
 
-    if let Err(e) = std::fs::rename(&temp_path, path) {
-        let _ = std::fs::remove_file(&temp_path); // best-effort cleanup
-        return Err(FlushError::Io(e));
-    }
+    // persist() does an atomic rename; if it fails, NamedTempFile drops and cleans up
+    temp.persist(path).map_err(|e| FlushError::Io(e.error))?;
 
     Ok(hash)
 }
@@ -236,7 +242,7 @@ mod tests {
         // Replace "line one" with "REPLACED"
         session.write(f.path(), 1, 2, vec!["REPLACED".into()]).unwrap();
 
-        let result = flush(&mut session, &HashMap::new(), false).unwrap();
+        let result = flush_session(&mut session, &HashMap::new(), false).unwrap();
         match result {
             FlushResult::Ok { files_written } => {
                 assert_eq!(files_written.len(), 1);
@@ -259,7 +265,7 @@ mod tests {
         session.write(f.path(), 1, 2, vec!["B".into()]).unwrap();
         session.write(f.path(), 3, 4, vec!["D".into()]).unwrap();
 
-        let result = flush(&mut session, &HashMap::new(), false).unwrap();
+        let result = flush_session(&mut session, &HashMap::new(), false).unwrap();
         assert!(matches!(result, FlushResult::Ok { .. }));
 
         let content = std::fs::read_to_string(f.path()).unwrap();
@@ -274,7 +280,7 @@ mod tests {
 
         session.write(f.path(), 1, 1, vec!["inserted".into()]).unwrap();
 
-        let result = flush(&mut session, &HashMap::new(), false).unwrap();
+        let result = flush_session(&mut session, &HashMap::new(), false).unwrap();
         assert!(matches!(result, FlushResult::Ok { .. }));
 
         let content = std::fs::read_to_string(f.path()).unwrap();
@@ -289,7 +295,7 @@ mod tests {
 
         session.write(f.path(), 1, 3, vec![]).unwrap();
 
-        let result = flush(&mut session, &HashMap::new(), false).unwrap();
+        let result = flush_session(&mut session, &HashMap::new(), false).unwrap();
         assert!(matches!(result, FlushResult::Ok { .. }));
 
         let content = std::fs::read_to_string(f.path()).unwrap();
@@ -321,7 +327,7 @@ mod tests {
             }],
         );
 
-        let result = flush(&mut session, &other_edits, false).unwrap();
+        let result = flush_session(&mut session, &other_edits, false).unwrap();
         match result {
             FlushResult::Conflict { conflicts } => {
                 assert_eq!(conflicts.len(), 1);
@@ -359,7 +365,7 @@ mod tests {
             }],
         );
 
-        let result = flush(&mut session, &other_edits, true).unwrap();
+        let result = flush_session(&mut session, &other_edits, true).unwrap();
         match result {
             FlushResult::Ok { files_written } => {
                 assert_eq!(files_written.len(), 1);
@@ -377,7 +383,7 @@ mod tests {
         let pool = BufferPool::new();
         let mut session = Session::open("s1".into(), &[f.path()], &pool).unwrap();
 
-        let result = flush(&mut session, &HashMap::new(), false).unwrap();
+        let result = flush_session(&mut session, &HashMap::new(), false).unwrap();
         match result {
             FlushResult::Ok { files_written } => {
                 assert!(files_written.is_empty());
@@ -393,7 +399,7 @@ mod tests {
         let mut session = Session::open("s1".into(), &[f.path()], &pool).unwrap();
 
         session.write(f.path(), 0, 1, vec!["A".into()]).unwrap();
-        let result = flush(&mut session, &HashMap::new(), false).unwrap();
+        let result = flush_session(&mut session, &HashMap::new(), false).unwrap();
         assert!(matches!(result, FlushResult::Ok { .. }));
 
         let content = std::fs::read_to_string(f.path()).unwrap();
@@ -407,7 +413,7 @@ mod tests {
         let mut session = Session::open("s1".into(), &[f.path()], &pool).unwrap();
 
         session.write(f.path(), 0, 1, vec!["A".into()]).unwrap();
-        let result = flush(&mut session, &HashMap::new(), false).unwrap();
+        let result = flush_session(&mut session, &HashMap::new(), false).unwrap();
         assert!(matches!(result, FlushResult::Ok { .. }));
 
         let content = std::fs::read_to_string(f.path()).unwrap();
@@ -421,7 +427,7 @@ mod tests {
         let mut session = Session::open("s1".into(), &[f.path()], &pool).unwrap();
 
         session.write(f.path(), 0, 1, vec!["A".into()]).unwrap();
-        let result = flush(&mut session, &HashMap::new(), false).unwrap();
+        let result = flush_session(&mut session, &HashMap::new(), false).unwrap();
         assert!(matches!(result, FlushResult::Ok { .. }));
 
         let handle = session.file(f.path()).unwrap();
@@ -439,7 +445,7 @@ mod tests {
         session.write(f.path(), 0, 1, vec!["A".into()]).unwrap();
         assert_eq!(session.file(f.path()).unwrap().pending_edit_count(), 1);
 
-        let result = flush(&mut session, &HashMap::new(), false).unwrap();
+        let result = flush_session(&mut session, &HashMap::new(), false).unwrap();
         assert!(matches!(result, FlushResult::Ok { .. }));
         assert_eq!(session.file(f.path()).unwrap().pending_edit_count(), 0);
     }
@@ -467,7 +473,7 @@ mod tests {
             }],
         );
 
-        let result = flush(&mut session, &other_edits, false).unwrap();
+        let result = flush_session(&mut session, &other_edits, false).unwrap();
         assert!(matches!(result, FlushResult::Conflict { .. }));
 
         // Edits should still be pending

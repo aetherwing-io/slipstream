@@ -20,8 +20,18 @@ pub struct FileBuffer {
     /// Hash of the canonical representation (lines joined with \n, optional trailing \n).
     /// Used to detect external modifications between load and flush.
     pub(crate) disk_hash: u64,
+}
+
+/// Entry in the buffer pool: wraps a `FileBuffer` with a lock-free reference count.
+///
+/// `ref_count` lives outside the `FileBuffer` lock so that `open()` can increment it
+/// without acquiring a read lock on the buffer (which would block if a flush holds
+/// the write lock).
+#[derive(Debug)]
+struct PoolEntry {
+    buffer: Arc<RwLock<FileBuffer>>,
     /// Number of sessions currently referencing this buffer.
-    pub(crate) ref_count: AtomicUsize,
+    ref_count: AtomicUsize,
 }
 
 impl FileBuffer {
@@ -56,7 +66,6 @@ impl FileBuffer {
             trailing_newline,
             version: 1,
             disk_hash,
-            ref_count: AtomicUsize::new(0),
         })
     }
 
@@ -88,23 +97,32 @@ impl FileBuffer {
     }
 }
 
+/// Extract just the file name from a path to avoid leaking full absolute paths
+/// in error messages returned over RPC.
+fn sanitize_path(path: &Path) -> String {
+    path.file_name()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// Errors that can occur during buffer operations.
 #[derive(Debug, thiserror::Error)]
 pub enum BufferError {
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
 
-    #[error("file too large: {} is {size_bytes} bytes (limit: {limit_bytes}). Use direct filesystem access.", path.display())]
+    #[error("file too large: {} is {size_bytes} bytes (limit: {limit_bytes}). Use direct filesystem access.", sanitize_path(path))]
     FileTooLarge {
         path: PathBuf,
         size_bytes: usize,
         limit_bytes: usize,
     },
 
-    #[error("file is not valid UTF-8: {}", .0.display())]
+    #[error("file is not valid UTF-8: {}", sanitize_path(.0))]
     NotUtf8(PathBuf),
 
-    #[error("file not loaded: {}", .0.display())]
+    #[error("file not loaded: {}", sanitize_path(.0))]
     NotLoaded(PathBuf),
 }
 
@@ -124,7 +142,7 @@ pub(crate) fn hash_content(content: &str) -> u64 {
 /// async tasks and sessions without requiring `&mut self`.
 #[derive(Debug)]
 pub struct BufferPool {
-    buffers: RwLock<HashMap<PathBuf, Arc<RwLock<FileBuffer>>>>,
+    buffers: RwLock<HashMap<PathBuf, PoolEntry>>,
     path_cache: RwLock<HashMap<PathBuf, PathBuf>>,
     max_file_size: usize,
 }
@@ -161,6 +179,10 @@ impl BufferPool {
         // Slow path: syscall + cache
         let canonical = std::fs::canonicalize(path).map_err(BufferError::Io)?;
         let mut cache = self.path_cache.write();
+        // Bounded cache: clear entirely if exceeding 1024 entries to prevent unbounded growth.
+        if cache.len() >= 1024 {
+            cache.clear();
+        }
         cache.insert(path.to_path_buf(), canonical.clone());
         Ok(canonical)
     }
@@ -174,27 +196,30 @@ impl BufferPool {
     pub fn open(&self, path: &Path) -> Result<Arc<RwLock<FileBuffer>>, BufferError> {
         let canonical = self.canonicalize(path)?;
 
-        // Fast path: check if already loaded (read lock only)
+        // Fast path: check if already loaded (read lock on pool only, no FileBuffer lock needed)
         {
             let buffers = self.buffers.read();
-            if let Some(buf) = buffers.get(&canonical) {
-                buf.read().ref_count.fetch_add(1, Ordering::Relaxed);
-                return Ok(Arc::clone(buf));
+            if let Some(entry) = buffers.get(&canonical) {
+                entry.ref_count.fetch_add(1, Ordering::Relaxed);
+                return Ok(Arc::clone(&entry.buffer));
             }
         }
 
-        // Slow path: load file and insert (write lock)
-        let mut buffer = FileBuffer::load(&canonical, self.max_file_size)?;
-        buffer.ref_count = AtomicUsize::new(1);
+        // Slow path: load file and insert (write lock on pool)
+        let buffer = FileBuffer::load(&canonical, self.max_file_size)?;
         let arc = Arc::new(RwLock::new(buffer));
 
         let mut buffers = self.buffers.write();
         // Double-check: another thread may have inserted while we loaded
         if let Some(existing) = buffers.get(&canonical) {
-            existing.read().ref_count.fetch_add(1, Ordering::Relaxed);
-            return Ok(Arc::clone(existing));
+            existing.ref_count.fetch_add(1, Ordering::Relaxed);
+            return Ok(Arc::clone(&existing.buffer));
         }
-        buffers.insert(canonical, Arc::clone(&arc));
+        let entry = PoolEntry {
+            buffer: Arc::clone(&arc),
+            ref_count: AtomicUsize::new(1),
+        };
+        buffers.insert(canonical, entry);
         Ok(arc)
     }
 
@@ -204,9 +229,19 @@ impl BufferPool {
 
         let mut buffers = self.buffers.write();
 
-        let should_remove = if let Some(buf) = buffers.get(&canonical) {
-            let prev = buf.read().ref_count.fetch_sub(1, Ordering::Relaxed);
-            prev == 1  // was 1, now 0
+        let should_remove = if let Some(entry) = buffers.get(&canonical) {
+            // Release ordering ensures all prior accesses from this thread are visible
+            // to the thread that observes the count reaching zero.
+            let prev = entry.ref_count.fetch_sub(1, Ordering::Release);
+            if prev == 1 {
+                // Acquire fence synchronizes with all prior Release stores from other
+                // threads, ensuring we see all their writes before we drop the buffer.
+                // This follows the standard Arc drop pattern.
+                std::sync::atomic::fence(Ordering::Acquire);
+                true
+            } else {
+                false
+            }
         } else {
             return Err(BufferError::NotLoaded(path.to_path_buf()));
         };
@@ -223,7 +258,17 @@ impl BufferPool {
         let buffers = self.buffers.read();
         buffers
             .get(&canonical)
-            .cloned()
+            .map(|entry| Arc::clone(&entry.buffer))
+            .ok_or_else(|| BufferError::NotLoaded(path.to_path_buf()))
+    }
+
+    /// Get the current ref_count for a buffer (for testing/diagnostics).
+    pub fn ref_count(&self, path: &Path) -> Result<usize, BufferError> {
+        let canonical = self.canonicalize(path)?;
+        let buffers = self.buffers.read();
+        buffers
+            .get(&canonical)
+            .map(|entry| entry.ref_count.load(Ordering::Relaxed))
             .ok_or_else(|| BufferError::NotLoaded(path.to_path_buf()))
     }
 }
@@ -349,7 +394,7 @@ mod tests {
         let f = temp_file("content\n");
         let pool = BufferPool::new();
         let buf = pool.open(f.path()).unwrap();
-        assert_eq!(buf.read().ref_count.load(Ordering::Relaxed), 1);
+        assert_eq!(pool.ref_count(f.path()).unwrap(), 1);
 
         let buf2 = pool.get(f.path()).unwrap();
         assert_eq!(Arc::as_ptr(&buf), Arc::as_ptr(&buf2));
@@ -362,8 +407,7 @@ mod tests {
         pool.open(f.path()).unwrap();
         pool.open(f.path()).unwrap();
 
-        let buf = pool.get(f.path()).unwrap();
-        assert_eq!(buf.read().ref_count.load(Ordering::Relaxed), 2);
+        assert_eq!(pool.ref_count(f.path()).unwrap(), 2);
     }
 
     #[test]
@@ -374,8 +418,7 @@ mod tests {
         pool.open(f.path()).unwrap();
 
         pool.release(f.path()).unwrap();
-        let buf = pool.get(f.path()).unwrap();
-        assert_eq!(buf.read().ref_count.load(Ordering::Relaxed), 1);
+        assert_eq!(pool.ref_count(f.path()).unwrap(), 1);
     }
 
     #[test]

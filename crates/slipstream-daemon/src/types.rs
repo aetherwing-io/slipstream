@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use slipstream_core::session::SessionId;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -11,7 +12,7 @@ pub struct SessionOpenParams {
 
 #[derive(Debug, Serialize)]
 pub struct SessionOpenResult {
-    pub session_id: String,
+    pub session_id: SessionId,
     pub files: HashMap<PathBuf, FileInfo>,
 }
 
@@ -25,7 +26,7 @@ pub struct FileInfo {
 
 #[derive(Debug, Deserialize)]
 pub struct SessionFlushParams {
-    pub session_id: String,
+    pub session_id: SessionId,
     #[serde(default)]
     pub force: bool,
 }
@@ -46,14 +47,14 @@ pub struct FileWrittenInfo {
 
 #[derive(Debug, Deserialize)]
 pub struct SessionCloseParams {
-    pub session_id: String,
+    pub session_id: SessionId,
 }
 
 // --- file.read ---
 
 #[derive(Debug, Deserialize)]
 pub struct FileReadParams {
-    pub session_id: String,
+    pub session_id: SessionId,
     pub path: PathBuf,
     /// If start/end provided, read by range
     pub start: Option<usize>,
@@ -80,7 +81,7 @@ pub struct OtherSessionInfo {
 
 #[derive(Debug, Deserialize)]
 pub struct FileWriteParams {
-    pub session_id: String,
+    pub session_id: SessionId,
     pub path: PathBuf,
     pub start: usize,
     pub end: usize,
@@ -96,7 +97,7 @@ pub struct FileWriteResult {
 
 #[derive(Debug, Deserialize)]
 pub struct FileStrReplaceParams {
-    pub session_id: String,
+    pub session_id: SessionId,
     pub path: PathBuf,
     pub old_str: String,
     pub new_str: String,
@@ -115,7 +116,7 @@ pub struct FileStrReplaceResult {
 
 #[derive(Debug, Deserialize)]
 pub struct CursorMoveParams {
-    pub session_id: String,
+    pub session_id: SessionId,
     pub path: PathBuf,
     pub to: usize,
 }
@@ -124,7 +125,7 @@ pub struct CursorMoveParams {
 
 #[derive(Debug, Deserialize)]
 pub struct BatchParams {
-    pub session_id: String,
+    pub session_id: SessionId,
     pub ops: Vec<BatchOp>,
 }
 
@@ -227,6 +228,12 @@ pub struct CoordinatorUnregisterParams {
 // --- coordinator.check ---
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckAction {
+    Build,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct CoordinatorCheckParams {
-    pub action: String,
+    pub action: CheckAction,
 }

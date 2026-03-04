@@ -29,6 +29,28 @@ pub enum FileState {
     Closed,
 }
 
+impl std::fmt::Display for FileState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FileState::Clean => f.write_str("clean"),
+            FileState::Dirty { edit_count } => write!(f, "{edit_count} edits pending"),
+            FileState::Flushed => f.write_str("flushed"),
+            FileState::ExternallyManaged => f.write_str("externally-managed"),
+            FileState::Closed => f.write_str("closed"),
+        }
+    }
+}
+
+impl std::fmt::Display for HandlerType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HandlerType::Native { .. } => f.write_str("native"),
+            HandlerType::External { handler_name } => f.write_str(handler_name),
+            HandlerType::Advisory { handler_name, .. } => f.write_str(handler_name),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct TrackedFile {
     pub path: PathBuf,
@@ -96,13 +118,44 @@ pub struct CheckResult {
 pub enum CoordinatorError {
     #[error("tracking_id not found: {0}")]
     TrackingIdNotFound(String),
-    #[error("unknown action: {0}")]
-    UnknownAction(String),
+
+    #[error("invalid handler name: {0}")]
+    InvalidHandlerName(String),
+}
+
+/// Maximum length for handler names.
+const MAX_HANDLER_NAME_LEN: usize = 64;
+
+/// Validate a handler name: alphanumeric, hyphens, underscores only; max 64 chars;
+/// no control characters, newlines, or path separators.
+fn validate_handler_name(name: &str) -> Result<(), CoordinatorError> {
+    if name.is_empty() {
+        return Err(CoordinatorError::InvalidHandlerName(
+            "handler name must not be empty".to_string(),
+        ));
+    }
+    if name.len() > MAX_HANDLER_NAME_LEN {
+        return Err(CoordinatorError::InvalidHandlerName(format!(
+            "handler name exceeds {MAX_HANDLER_NAME_LEN} characters"
+        )));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(CoordinatorError::InvalidHandlerName(
+            "handler name must contain only alphanumeric characters, hyphens, or underscores"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 pub struct Coordinator {
     /// Canonical path → tracked file entry.
     files: DashMap<PathBuf, TrackedFile>,
+    /// Reverse index: tracking_id → canonical_path (for O(1) unregister).
+    tracking_index: DashMap<String, PathBuf>,
     /// Monotonic counter for tracking IDs.
     next_id: AtomicU64,
 }
@@ -118,6 +171,7 @@ impl Coordinator {
     pub fn new() -> Self {
         Self {
             files: DashMap::new(),
+            tracking_index: DashMap::new(),
             next_id: AtomicU64::new(0),
         }
     }
@@ -141,6 +195,10 @@ impl Coordinator {
     ) -> String {
         let tracking_id = self.next_tracking_id();
         let now = Instant::now();
+        // If this canonical path was already tracked, remove old tracking_id from index.
+        if let Some(old) = self.files.get(&canonical.to_path_buf()) {
+            self.tracking_index.remove(&old.tracking_id);
+        }
         self.files.insert(
             canonical.to_path_buf(),
             TrackedFile {
@@ -153,6 +211,8 @@ impl Coordinator {
                 last_activity: now,
             },
         );
+        self.tracking_index
+            .insert(tracking_id.clone(), canonical.to_path_buf());
         tracking_id
     }
 
@@ -161,14 +221,19 @@ impl Coordinator {
         path: &Path,
         handler_name: &str,
     ) -> Result<String, CoordinatorError> {
+        validate_handler_name(handler_name)?;
         let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let tracking_id = self.next_tracking_id();
         let now = Instant::now();
+        // If this canonical path was already tracked, remove old tracking_id from index.
+        if let Some(old) = self.files.get(&canonical) {
+            self.tracking_index.remove(&old.tracking_id);
+        }
         self.files.insert(
             canonical.clone(),
             TrackedFile {
                 path: path.to_path_buf(),
-                canonical_path: canonical,
+                canonical_path: canonical.clone(),
                 handler: HandlerType::External {
                     handler_name: handler_name.to_string(),
                 },
@@ -178,18 +243,15 @@ impl Coordinator {
                 last_activity: now,
             },
         );
+        self.tracking_index
+            .insert(tracking_id.clone(), canonical);
         Ok(tracking_id)
     }
 
     pub fn unregister(&self, tracking_id: &str) -> Result<(), CoordinatorError> {
-        let key = self
-            .files
-            .iter()
-            .find(|e| e.value().tracking_id == tracking_id)
-            .map(|e| e.key().clone());
-        match key {
-            Some(k) => {
-                self.files.remove(&k);
+        match self.tracking_index.remove(tracking_id) {
+            Some((_, canonical)) => {
+                self.files.remove(&canonical);
                 Ok(())
             }
             None => Err(CoordinatorError::TrackingIdNotFound(
@@ -237,7 +299,11 @@ impl Coordinator {
 
     // Digest
 
-    pub fn build_digest(&self, cwd: &Path) -> SessionDigest {
+    /// Build a digest of tracked files, optionally filtered to a specific session.
+    ///
+    /// When `session_filter` is `Some`, only files belonging to that session are included.
+    /// This prevents leaking information about files tracked by other sessions.
+    pub fn build_digest(&self, cwd: &Path, session_filter: Option<&SessionId>) -> SessionDigest {
         let mut total_tracked = 0;
         let mut native_count = 0;
         let mut native_dirty = 0;
@@ -246,13 +312,23 @@ impl Coordinator {
 
         for entry in self.files.iter() {
             let tf = entry.value();
+
+            // If a session filter is provided, skip files not belonging to this session.
+            if let Some(filter_sid) = session_filter {
+                let belongs = match &tf.handler {
+                    HandlerType::Native { session_id } => session_id == filter_sid,
+                    HandlerType::Advisory { session_id, .. } => session_id == filter_sid,
+                    HandlerType::External { .. } => false,
+                };
+                if !belongs {
+                    continue;
+                }
+            }
+
             total_tracked += 1;
 
-            let (handler_name, is_external) = match &tf.handler {
-                HandlerType::Native { .. } => ("native".to_string(), false),
-                HandlerType::External { handler_name } => (handler_name.clone(), true),
-                HandlerType::Advisory { handler_name, .. } => (handler_name.clone(), false),
-            };
+            let is_external = matches!(&tf.handler, HandlerType::External { .. });
+            let handler_name = tf.handler.to_string();
 
             if is_external {
                 external_count += 1;
@@ -260,16 +336,10 @@ impl Coordinator {
                 native_count += 1;
             }
 
-            let state_str = match &tf.state {
-                FileState::Clean => "clean".to_string(),
-                FileState::Dirty { edit_count } => {
-                    native_dirty += 1;
-                    format!("{edit_count} edits pending")
-                }
-                FileState::Flushed => "flushed".to_string(),
-                FileState::ExternallyManaged => "externally-managed".to_string(),
-                FileState::Closed => "closed".to_string(),
-            };
+            if matches!(&tf.state, FileState::Dirty { .. }) {
+                native_dirty += 1;
+            }
+            let state_str = tf.state.to_string();
 
             let path_str = relative_or_absolute(&tf.canonical_path, cwd);
 
@@ -353,11 +423,13 @@ impl Coordinator {
 
     // Check action
 
-    pub fn check_action(&self, action: &str) -> Result<CheckResult, CoordinatorError> {
-        if action != "build" {
-            return Err(CoordinatorError::UnknownAction(action.to_string()));
+    pub fn check_action(&self, action: crate::types::CheckAction) -> CheckResult {
+        match action {
+            crate::types::CheckAction::Build => self.check_build(),
         }
+    }
 
+    fn check_build(&self) -> CheckResult {
         let mut warnings = Vec::new();
         let mut flush_cmds = Vec::new();
         let mut save_cmds = Vec::new();
@@ -398,10 +470,10 @@ impl Coordinator {
             parts.join(". ")
         };
 
-        Ok(CheckResult {
+        CheckResult {
             warnings,
             suggestion,
-        })
+        }
     }
 }
 
@@ -424,7 +496,7 @@ mod tests {
         let c = Coordinator::new();
         let tid = c.register_native(&tmp_path("foo.py"), &tmp_path("foo.py"), sid("s1"));
         assert!(tid.starts_with("ext-"));
-        assert_eq!(c.build_digest(Path::new("/tmp")).total_tracked, 1);
+        assert_eq!(c.build_digest(Path::new("/tmp"), None).total_tracked, 1);
     }
 
     #[test]
@@ -434,7 +506,7 @@ mod tests {
             .register_external(&tmp_path("sheet.xlsx"), "sheets")
             .unwrap();
         assert!(tid.starts_with("ext-"));
-        assert_eq!(c.build_digest(Path::new("/tmp")).external_count, 1);
+        assert_eq!(c.build_digest(Path::new("/tmp"), None).external_count, 1);
     }
 
     #[test]
@@ -465,7 +537,7 @@ mod tests {
             .register_external(&tmp_path("rm.xlsx"), "sheets")
             .unwrap();
         c.unregister(&tid).unwrap();
-        assert_eq!(c.build_digest(Path::new("/tmp")).total_tracked, 0);
+        assert_eq!(c.build_digest(Path::new("/tmp"), None).total_tracked, 0);
     }
 
     #[test]
@@ -483,9 +555,9 @@ mod tests {
         let c = Coordinator::new();
         let p = tmp_path("dirty.py");
         c.register_native(&p, &p, sid("s1"));
-        assert_eq!(c.build_digest(Path::new("/tmp")).native_dirty, 0);
+        assert_eq!(c.build_digest(Path::new("/tmp"), None).native_dirty, 0);
         c.mark_dirty(&p, 3);
-        let digest = c.build_digest(Path::new("/tmp"));
+        let digest = c.build_digest(Path::new("/tmp"), None);
         assert_eq!(digest.native_dirty, 1);
         let entry = digest.files.iter().find(|f| f.path.contains("dirty")).unwrap();
         assert_eq!(entry.state, "3 edits pending");
@@ -498,7 +570,7 @@ mod tests {
         c.register_native(&p, &p, sid("s1"));
         c.mark_dirty(&p, 2);
         c.mark_flushed(&p);
-        let digest = c.build_digest(Path::new("/tmp"));
+        let digest = c.build_digest(Path::new("/tmp"), None);
         assert_eq!(digest.native_dirty, 0);
         let entry = digest.files.iter().find(|f| f.path.contains("flush")).unwrap();
         assert_eq!(entry.state, "flushed");
@@ -532,7 +604,7 @@ mod tests {
         let p = tmp_path("swept.py");
         c.register_native(&p, &p, sid("abc"));
         c.on_sessions_swept(&[sid("abc")]);
-        let digest = c.build_digest(Path::new("/tmp"));
+        let digest = c.build_digest(Path::new("/tmp"), None);
         let entry = digest.files.iter().find(|f| f.path.contains("swept")).unwrap();
         assert_eq!(entry.state, "closed");
     }
@@ -549,7 +621,7 @@ mod tests {
             c.register_external(&tmp_path(&format!("count_e{i}.xlsx")), "sheets")
                 .unwrap();
         }
-        let digest = c.build_digest(Path::new("/tmp"));
+        let digest = c.build_digest(Path::new("/tmp"), None);
         assert_eq!(digest.total_tracked, 5);
         assert_eq!(digest.native_count, 2);
         assert_eq!(digest.native_dirty, 1);
@@ -562,7 +634,7 @@ mod tests {
         let p = PathBuf::from("/tmp/test_dir/foo.py");
         c.register_external(&p, "sheets").unwrap();
         // register_external canonicalizes, but for non-existent paths falls back to given path
-        let digest = c.build_digest(Path::new("/tmp/test_dir"));
+        let digest = c.build_digest(Path::new("/tmp/test_dir"), None);
         let entry = &digest.files[0];
         assert_eq!(entry.path, "foo.py");
     }
@@ -575,7 +647,7 @@ mod tests {
         c.register_native(&p1, &p1, sid("s1"));
         c.register_native(&p2, &p2, sid("s1"));
         c.mark_dirty(&p1, 5);
-        let result = c.check_action("build").unwrap();
+        let result = c.check_action(crate::types::CheckAction::Build);
         assert_eq!(result.warnings.len(), 1);
         assert!(result.warnings[0].contains("unflushed edits"));
         assert!(result.suggestion.to_lowercase().contains("flush"));
@@ -586,7 +658,7 @@ mod tests {
         let c = Coordinator::new();
         c.register_external(&tmp_path("chk_ext.xlsx"), "sheets")
             .unwrap();
-        let result = c.check_action("build").unwrap();
+        let result = c.check_action(crate::types::CheckAction::Build);
         assert_eq!(result.warnings.len(), 1);
         assert!(result.warnings[0].contains("externally managed"));
         assert!(result.suggestion.to_lowercase().contains("save"));
@@ -601,16 +673,9 @@ mod tests {
         c.register_native(&p2, &p2, sid("s1"));
         c.mark_flushed(&p1);
         c.mark_flushed(&p2);
-        let result = c.check_action("build").unwrap();
+        let result = c.check_action(crate::types::CheckAction::Build);
         assert!(result.warnings.is_empty());
         assert_eq!(result.suggestion, "Ready to build");
-    }
-
-    #[test]
-    fn test_check_action_unknown() {
-        let c = Coordinator::new();
-        let result = c.check_action("deploy");
-        assert!(matches!(result, Err(CoordinatorError::UnknownAction(_))));
     }
 
     #[test]

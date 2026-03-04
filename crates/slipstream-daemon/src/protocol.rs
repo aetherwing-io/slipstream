@@ -20,10 +20,20 @@ pub struct Response {
 
 impl Response {
     pub fn ok(id: Option<u64>, result: impl Serialize) -> Self {
-        Response {
-            id,
-            result: Some(serde_json::to_value(result).unwrap()),
-            error: None,
+        match serde_json::to_value(result) {
+            Ok(v) => Response {
+                id,
+                result: Some(v),
+                error: None,
+            },
+            Err(e) => Self::err(
+                id,
+                RpcError {
+                    code: ERR_INTERNAL,
+                    message: format!("serialization error: {e}"),
+                    data: None,
+                },
+            ),
         }
     }
 
@@ -57,3 +67,4 @@ pub const ERR_CONFLICT: i32 = 409;
 pub const ERR_SESSION_NOT_FOUND: i32 = 404;
 #[allow(dead_code)]
 pub const ERR_FILE_TOO_LARGE: i32 = 413;
+pub const ERR_RESOURCE_LIMIT: i32 = -32003;

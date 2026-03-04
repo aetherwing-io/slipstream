@@ -878,6 +878,7 @@ name = "slipstream-daemon"
 version = "0.1.0"
 dependencies = [
  "dashmap",
+ "libc",
  "pathdiff",
  "serde",
  "serde_json",

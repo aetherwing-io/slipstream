@@ -9,9 +9,13 @@ use std::sync::Arc;
 use slipstream_core::manager::SessionManager;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
+use tokio::sync::Semaphore;
 
 use crate::coordinator::Coordinator;
 use crate::registry::FormatRegistry;
+
+/// Maximum number of concurrent client connections.
+pub const MAX_CONNECTIONS: usize = 128;
 
 /// Run the server accept loop. Spawns a task per connection.
 /// Returns when the listener is dropped or encounters a fatal error.
@@ -21,9 +25,45 @@ pub async fn serve(
     registry: Arc<FormatRegistry>,
     coordinator: Arc<Coordinator>,
 ) {
+    let conn_semaphore = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
+                // Verify peer UID matches our own (reject connections from other users)
+                #[cfg(unix)]
+                {
+                    let my_uid = unsafe { libc::getuid() };
+                    match stream.peer_cred() {
+                        Ok(cred) => {
+                            if cred.uid() != my_uid {
+                                tracing::warn!(
+                                    "rejected connection from uid {} (expected {})",
+                                    cred.uid(),
+                                    my_uid
+                                );
+                                continue;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("failed to get peer credentials, rejecting: {e}");
+                            continue;
+                        }
+                    }
+                }
+
+                let permit = match conn_semaphore.clone().try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        tracing::warn!(
+                            "connection limit reached ({MAX_CONNECTIONS}), rejecting"
+                        );
+                        // Drop the stream — client will get a connection reset
+                        drop(stream);
+                        continue;
+                    }
+                };
+
                 let mgr = Arc::clone(&mgr);
                 let registry = Arc::clone(&registry);
                 let coordinator = Arc::clone(&coordinator);
@@ -33,6 +73,8 @@ pub async fn serve(
                     {
                         tracing::warn!("connection error: {e}");
                     }
+                    // Permit is dropped here, releasing the semaphore slot
+                    drop(permit);
                 });
             }
             Err(e) => {

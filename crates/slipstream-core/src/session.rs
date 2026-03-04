@@ -4,14 +4,15 @@ use std::sync::Arc;
 use std::time::Instant;
 use parking_lot::RwLock;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::buffer::{BufferPool, BufferError, FileBuffer};
 use crate::edit::Edit;
 use crate::str_match::{self, StrReplaceError};
 
 /// Unique session identifier (newtype for type safety).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct SessionId(String);
 
 impl SessionId {
@@ -52,35 +53,14 @@ pub enum SessionStatus {
     Closed,
 }
 
-/// A cursor tracking the current read position in a file.
-#[derive(Debug, Clone)]
-pub struct Cursor {
-    pub line: usize,
-}
-
-impl Cursor {
-    pub fn new() -> Self {
-        Cursor { line: 0 }
-    }
-
-    pub fn at(line: usize) -> Self {
-        Cursor { line }
-    }
-}
-
-impl Default for Cursor {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Per-session handle to a file buffer. Tracks snapshot version, cursor, and pending edits.
 #[derive(Debug)]
 pub struct FileHandle {
     pub buffer: Arc<RwLock<FileBuffer>>,
     /// Buffer version when this session opened the file.
     pub snapshot_version: u64,
-    pub cursor: Cursor,
+    /// Current read cursor position (line number, 0-indexed).
+    pub cursor: usize,
     pub edits: Vec<Edit>,
     /// Canonical path for this file handle.
     pub path: PathBuf,
@@ -98,16 +78,16 @@ impl FileHandle {
     /// Read `count` lines from the current cursor position, advancing the cursor.
     pub fn read_from_cursor(&mut self, count: usize) -> Result<Vec<String>, SessionError> {
         let buf = self.buffer.read();
-        let start = self.cursor.line.min(buf.lines.len());
+        let start = self.cursor.min(buf.lines.len());
         let end = (start + count).min(buf.lines.len());
         let lines = buf.lines[start..end].to_vec();
-        self.cursor.line = end;
+        self.cursor = end;
         Ok(lines)
     }
 
     /// Move the cursor to a specific line.
     pub fn move_cursor(&mut self, to: usize) {
-        self.cursor.line = to;
+        self.cursor = to;
     }
 
     /// Queue an edit (not applied until flush).
@@ -139,7 +119,7 @@ pub struct Session {
     pub files: HashMap<PathBuf, FileHandle>,
     /// Cache of raw path → canonical path for this session's files.
     path_cache: HashMap<PathBuf, PathBuf>,
-    pub status: SessionStatus,
+    pub(crate) status: SessionStatus,
     pub created_at: Instant,
     pub last_activity: Instant,
 }
@@ -186,7 +166,7 @@ impl Session {
                 FileHandle {
                     buffer: buf,
                     snapshot_version: version,
-                    cursor: Cursor::new(),
+                    cursor: 0,
                     edits: Vec::new(),
                     path: canonical,
                 },
@@ -249,7 +229,7 @@ impl Session {
         self.touch();
         let handle = self.file_mut(path)?;
         let lines = handle.read_from_cursor(count)?;
-        let cursor = handle.cursor.line;
+        let cursor = handle.cursor;
         Ok((lines, cursor))
     }
 
@@ -322,7 +302,6 @@ impl Session {
 
     /// Close the session, releasing all buffer references.
     pub fn close(mut self, pool: &BufferPool) -> Result<(), SessionError> {
-        self.status = SessionStatus::Closed;
         for (_, handle) in self.files.drain() {
             let _ = pool.release(&handle.path);
         }

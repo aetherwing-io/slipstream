@@ -10,6 +10,12 @@ use crate::protocol::{self, Request, Response, RpcError};
 use crate::registry::{FormatRegistry, HandlerEntry};
 use crate::types::*;
 
+// --- Resource limits ---
+pub const MAX_SESSIONS: usize = 64;
+pub const MAX_FILES_PER_SESSION: usize = 32;
+pub const MAX_BATCH_OPS: usize = 256;
+pub const MAX_CONTENT_LINES_PER_WRITE: usize = 50_000;
+
 /// Dispatch a JSON-RPC request to the appropriate handler.
 pub fn dispatch(
     req: Request,
@@ -65,6 +71,17 @@ fn internal_error(id: Option<u64>, msg: String) -> Response {
     )
 }
 
+fn resource_limit_error(id: Option<u64>, msg: String) -> Response {
+    Response::err(
+        id,
+        RpcError {
+            code: protocol::ERR_RESOURCE_LIMIT,
+            message: msg,
+            data: None,
+        },
+    )
+}
+
 fn session_not_found(id: Option<u64>, session_id: &str) -> Response {
     Response::err(
         id,
@@ -76,9 +93,14 @@ fn session_not_found(id: Option<u64>, session_id: &str) -> Response {
     )
 }
 
-fn inject_digest(mut response: Response, coordinator: &Coordinator, cwd: &Path) -> Response {
+fn inject_digest(
+    mut response: Response,
+    coordinator: &Coordinator,
+    cwd: &Path,
+    session_filter: Option<&SessionId>,
+) -> Response {
     if let Some(ref mut value) = response.result {
-        let digest = coordinator.build_digest(cwd);
+        let digest = coordinator.build_digest(cwd, session_filter);
         if let Ok(digest_val) = serde_json::to_value(&digest) {
             if let Some(obj) = value.as_object_mut() {
                 obj.insert("session_digest".to_string(), digest_val);
@@ -102,6 +124,23 @@ fn handle_session_open(
         Ok(p) => p,
         Err(resp) => return resp,
     };
+
+    // Resource limits
+    if mgr.session_count() >= MAX_SESSIONS {
+        return resource_limit_error(
+            req.id,
+            format!("session limit reached ({MAX_SESSIONS} max)"),
+        );
+    }
+    if params.files.len() > MAX_FILES_PER_SESSION {
+        return resource_limit_error(
+            req.id,
+            format!(
+                "too many files in session: {} (max {MAX_FILES_PER_SESSION})",
+                params.files.len()
+            ),
+        );
+    }
 
     // Classify files by handler type
     let mut native_files: Vec<PathBuf> = Vec::new();
@@ -193,8 +232,7 @@ fn handle_session_open(
     // Register all files in coordinator
     for path in &all_paths {
         let canonical = mgr
-            .pool()
-            .canonicalize(path)
+            .canonical_path(path)
             .unwrap_or_else(|_| path.to_path_buf());
         coordinator.register_native(path, &canonical, session_id.clone());
     }
@@ -225,10 +263,13 @@ fn handle_session_open(
     if !advisory_files.is_empty() && native_files.is_empty() {
         // All advisory: wrap in advisory response
         let base = SessionOpenResult {
-            session_id: session_id.as_str().to_owned(),
+            session_id: session_id.clone(),
             files,
         };
-        let mut val = serde_json::to_value(base).unwrap_or_default();
+        let mut val = match serde_json::to_value(base) {
+            Ok(v) => v,
+            Err(e) => return internal_error(req.id, format!("serialization error: {e}")),
+        };
         if let Some(obj) = val.as_object_mut() {
             let (_, handler_name, guidance) = &advisory_files[0];
             obj.insert("status".to_string(), serde_json::json!("advisory"));
@@ -241,18 +282,18 @@ fn handle_session_open(
             result: Some(val),
             error: None,
         };
-        resp = inject_digest(resp, coordinator, &cwd());
+        resp = inject_digest(resp, coordinator, &cwd(), Some(&session_id));
         return resp;
     }
 
     let resp = Response::ok(
         req.id,
         SessionOpenResult {
-            session_id: session_id.as_str().to_owned(),
+            session_id: session_id.clone(),
             files,
         },
     );
-    inject_digest(resp, coordinator, &cwd())
+    inject_digest(resp, coordinator, &cwd(), Some(&session_id))
 }
 
 fn handle_session_flush(
@@ -265,15 +306,12 @@ fn handle_session_flush(
         Err(resp) => return resp,
     };
 
-    let session_id: SessionId = params.session_id.into();
-
-    match mgr.flush_session(&session_id, params.force) {
+    match mgr.flush_session(&params.session_id, params.force) {
         Ok(FlushResult::Ok { files_written }) => {
             // Mark flushed files in coordinator
             for f in &files_written {
                 let canonical = mgr
-                    .pool()
-                    .canonicalize(&f.path)
+                    .canonical_path(&f.path)
                     .unwrap_or_else(|_| f.path.clone());
                 coordinator.mark_flushed(&canonical);
             }
@@ -291,7 +329,7 @@ fn handle_session_flush(
                     files_written: files,
                 },
             );
-            inject_digest(resp, coordinator, &cwd())
+            inject_digest(resp, coordinator, &cwd(), Some(&params.session_id))
         }
         Ok(FlushResult::Conflict { conflicts }) => {
             let data: Vec<ConflictData> = conflicts
@@ -310,11 +348,11 @@ fn handle_session_flush(
                 RpcError {
                     code: protocol::ERR_CONFLICT,
                     message: "conflicting edits detected".into(),
-                    data: Some(serde_json::to_value(data).unwrap_or_default()),
+                    data: serde_json::to_value(data).ok(),
                 },
             )
         }
-        Err(e) => match_manager_error(req.id, session_id.as_str(), e),
+        Err(e) => match_manager_error(req.id, params.session_id.as_str(), e),
     }
 }
 
@@ -328,15 +366,13 @@ fn handle_session_close(
         Err(resp) => return resp,
     };
 
-    let session_id: SessionId = params.session_id.into();
-
-    match mgr.close_session(&session_id) {
+    match mgr.close_session(&params.session_id) {
         Ok(()) => {
-            coordinator.mark_closed_by_session(&session_id);
+            coordinator.mark_closed_by_session(&params.session_id);
             let resp = Response::ok(req.id, serde_json::json!({"status": "closed"}));
-            inject_digest(resp, coordinator, &cwd())
+            inject_digest(resp, coordinator, &cwd(), Some(&params.session_id))
         }
-        Err(e) => match_manager_error(req.id, session_id.as_str(), e),
+        Err(e) => match_manager_error(req.id, params.session_id.as_str(), e),
     }
 }
 
@@ -346,9 +382,7 @@ fn handle_file_read(mut req: Request, mgr: &Arc<SessionManager>) -> Response {
         Err(resp) => return resp,
     };
 
-    let session_id: SessionId = params.session_id.into();
-
-    let result = mgr.with_session_mut(&session_id, |session| {
+    let result = mgr.with_session_mut(&params.session_id, |session| {
         let (lines, cursor) = if let (Some(start), Some(end)) = (params.start, params.end) {
             let lines = session.read(&params.path, start, end)?;
             (lines, end)
@@ -365,9 +399,9 @@ fn handle_file_read(mut req: Request, mgr: &Arc<SessionManager>) -> Response {
 
     match result {
         Ok((lines, cursor)) => {
-            let canonical = mgr.pool().canonicalize(&params.path);
+            let canonical = mgr.canonical_path(&params.path);
             let other_sessions = if let Ok(canonical) = canonical {
-                mgr.other_sessions_info(&session_id, &canonical)
+                mgr.other_sessions_info(&params.session_id, &canonical)
                     .unwrap_or_default()
                     .into_iter()
                     .map(|(id, ranges)| OtherSessionInfo {
@@ -389,7 +423,7 @@ fn handle_file_read(mut req: Request, mgr: &Arc<SessionManager>) -> Response {
                 },
             )
         }
-        Err(e) => match_manager_error(req.id, session_id.as_str(), e),
+        Err(e) => match_manager_error(req.id, params.session_id.as_str(), e),
     }
 }
 
@@ -403,22 +437,29 @@ fn handle_file_write(
         Err(resp) => return resp,
     };
 
-    let session_id: SessionId = params.session_id.into();
+    if params.content.len() > MAX_CONTENT_LINES_PER_WRITE {
+        return resource_limit_error(
+            req.id,
+            format!(
+                "content too large: {} lines (max {MAX_CONTENT_LINES_PER_WRITE})",
+                params.content.len()
+            ),
+        );
+    }
 
-    match mgr.with_session_mut(&session_id, |session| {
+    match mgr.with_session_mut(&params.session_id, |session| {
         let count = session.write(&params.path, params.start, params.end, params.content)?;
         Ok(count)
     }) {
         Ok(edits_pending) => {
             let canonical = mgr
-                .pool()
-                .canonicalize(&params.path)
+                .canonical_path(&params.path)
                 .unwrap_or_else(|_| params.path.clone());
             coordinator.mark_dirty(&canonical, edits_pending);
             let resp = Response::ok(req.id, FileWriteResult { edits_pending });
-            inject_digest(resp, coordinator, &cwd())
+            inject_digest(resp, coordinator, &cwd(), Some(&params.session_id))
         }
-        Err(e) => match_manager_error(req.id, session_id.as_str(), e),
+        Err(e) => match_manager_error(req.id, params.session_id.as_str(), e),
     }
 }
 
@@ -432,9 +473,7 @@ fn handle_file_str_replace(
         Err(resp) => return resp,
     };
 
-    let session_id: SessionId = params.session_id.into();
-
-    match mgr.with_session_mut(&session_id, |session| {
+    match mgr.with_session_mut(&params.session_id, |session| {
         let (match_line, match_count, edits_pending) = session.str_replace(
             &params.path,
             &params.old_str,
@@ -445,8 +484,7 @@ fn handle_file_str_replace(
     }) {
         Ok((match_line, match_count, edits_pending)) => {
             let canonical = mgr
-                .pool()
-                .canonicalize(&params.path)
+                .canonical_path(&params.path)
                 .unwrap_or_else(|_| params.path.clone());
             coordinator.mark_dirty(&canonical, edits_pending);
             let resp = Response::ok(
@@ -457,9 +495,9 @@ fn handle_file_str_replace(
                     match_count,
                 },
             );
-            inject_digest(resp, coordinator, &cwd())
+            inject_digest(resp, coordinator, &cwd(), Some(&params.session_id))
         }
-        Err(e) => match_manager_error(req.id, session_id.as_str(), e),
+        Err(e) => match_manager_error(req.id, params.session_id.as_str(), e),
     }
 }
 
@@ -469,14 +507,12 @@ fn handle_cursor_move(mut req: Request, mgr: &Arc<SessionManager>) -> Response {
         Err(resp) => return resp,
     };
 
-    let session_id: SessionId = params.session_id.into();
-
-    match mgr.with_session_mut(&session_id, |session| {
+    match mgr.with_session_mut(&params.session_id, |session| {
         session.move_cursor(&params.path, params.to)?;
         Ok(())
     }) {
         Ok(()) => Response::ok(req.id, serde_json::json!({"status": "ok"})),
-        Err(e) => match_manager_error(req.id, session_id.as_str(), e),
+        Err(e) => match_manager_error(req.id, params.session_id.as_str(), e),
     }
 }
 
@@ -490,16 +526,31 @@ fn handle_batch(
         Err(resp) => return resp,
     };
 
-    let session_id: SessionId = params.session_id.into();
-    let had_mutations = params.ops.iter().any(|op| {
+    let session_id = params.session_id;
+    let ops = params.ops;
+
+    if ops.len() > MAX_BATCH_OPS {
+        return resource_limit_error(
+            req.id,
+            format!(
+                "too many batch operations: {} (max {MAX_BATCH_OPS})",
+                ops.len()
+            ),
+        );
+    }
+
+    let had_mutations = ops.iter().any(|op| {
         matches!(op, BatchOp::Write { .. } | BatchOp::StrReplace { .. })
     });
 
-    let results: Result<Vec<serde_json::Value>, _> =
+    // Track which files were mutated so we can update coordinator state after.
+    // Each entry: (path from the op, edits_pending count).
+    let results: Result<(Vec<serde_json::Value>, Vec<(PathBuf, usize)>), _> =
         mgr.with_session_mut(&session_id, |session| {
-            let mut results = Vec::with_capacity(params.ops.len());
+            let mut results = Vec::with_capacity(ops.len());
+            let mut dirty_files: Vec<(PathBuf, usize)> = Vec::new();
 
-            for op in params.ops {
+            for op in ops {
                 let value = match op {
                     BatchOp::Read {
                         path,
@@ -528,6 +579,7 @@ fn handle_batch(
                         content,
                     } => {
                         let count = session.write(&path, start, end, content)?;
+                        dirty_files.push((path, count));
                         serde_json::json!({"edits_pending": count})
                     }
                     BatchOp::StrReplace {
@@ -538,6 +590,7 @@ fn handle_batch(
                     } => {
                         let (match_line, match_count, edits_pending) =
                             session.str_replace(&path, &old_str, &new_str, replace_all)?;
+                        dirty_files.push((path, edits_pending));
                         serde_json::json!({"edits_pending": edits_pending, "match_line": match_line, "match_count": match_count})
                     }
                     BatchOp::CursorMove { path, to } => {
@@ -548,14 +601,21 @@ fn handle_batch(
                 results.push(value);
             }
 
-            Ok(results)
+            Ok((results, dirty_files))
         });
 
     match results {
-        Ok(values) => {
+        Ok((values, dirty_files)) => {
+            // Update coordinator state for all mutated files
+            for (path, edits_pending) in &dirty_files {
+                let canonical = mgr
+                    .canonical_path(path)
+                    .unwrap_or_else(|_| path.clone());
+                coordinator.mark_dirty(&canonical, *edits_pending);
+            }
             let resp = Response::ok(req.id, values);
             if had_mutations {
-                inject_digest(resp, coordinator, &cwd())
+                inject_digest(resp, coordinator, &cwd(), Some(&session_id))
             } else {
                 resp
             }
@@ -568,8 +628,12 @@ fn handle_batch(
 
 fn handle_coordinator_status(req: Request, coordinator: &Arc<Coordinator>) -> Response {
     let status = coordinator.status();
-    let resp = Response::ok(req.id, serde_json::to_value(status).unwrap_or_default());
-    inject_digest(resp, coordinator, &cwd())
+    let val = match serde_json::to_value(status) {
+        Ok(v) => v,
+        Err(e) => return internal_error(req.id, format!("serialization error: {e}")),
+    };
+    let resp = Response::ok(req.id, val);
+    inject_digest(resp, coordinator, &cwd(), None)
 }
 
 fn handle_coordinator_register(
@@ -583,14 +647,28 @@ fn handle_coordinator_register(
     let path = Path::new(&params.path);
     let tracking_id = match coordinator.register_external(path, &params.handler) {
         Ok(id) => id,
+        Err(CoordinatorError::InvalidHandlerName(msg)) => {
+            return Response::err(
+                req.id,
+                RpcError {
+                    code: protocol::ERR_INVALID_PARAMS,
+                    message: format!("invalid handler name: {msg}"),
+                    data: None,
+                },
+            );
+        }
         Err(e) => return internal_error(req.id, e.to_string()),
     };
     let result = CoordinatorRegisterResult {
         tracking_id,
         status: "registered".to_string(),
     };
-    let resp = Response::ok(req.id, serde_json::to_value(result).unwrap_or_default());
-    inject_digest(resp, coordinator, &cwd())
+    let val = match serde_json::to_value(result) {
+        Ok(v) => v,
+        Err(e) => return internal_error(req.id, format!("serialization error: {e}")),
+    };
+    let resp = Response::ok(req.id, val);
+    inject_digest(resp, coordinator, &cwd(), None)
 }
 
 fn handle_coordinator_unregister(mut req: Request, coordinator: &Arc<Coordinator>) -> Response {
@@ -601,7 +679,7 @@ fn handle_coordinator_unregister(mut req: Request, coordinator: &Arc<Coordinator
     match coordinator.unregister(&params.tracking_id) {
         Ok(()) => {
             let resp = Response::ok(req.id, serde_json::json!({}));
-            inject_digest(resp, coordinator, &cwd())
+            inject_digest(resp, coordinator, &cwd(), None)
         }
         Err(CoordinatorError::TrackingIdNotFound(_)) => Response::err(
             req.id,
@@ -620,22 +698,13 @@ fn handle_coordinator_check(mut req: Request, coordinator: &Arc<Coordinator>) ->
         Ok(p) => p,
         Err(resp) => return resp,
     };
-    match coordinator.check_action(&params.action) {
-        Ok(result) => {
-            let resp =
-                Response::ok(req.id, serde_json::to_value(result).unwrap_or_default());
-            inject_digest(resp, coordinator, &cwd())
-        }
-        Err(CoordinatorError::UnknownAction(_)) => Response::err(
-            req.id,
-            RpcError {
-                code: protocol::ERR_INVALID_PARAMS,
-                message: "unknown action".to_string(),
-                data: None,
-            },
-        ),
-        Err(e) => internal_error(req.id, e.to_string()),
-    }
+    let result = coordinator.check_action(params.action);
+    let val = match serde_json::to_value(result) {
+        Ok(v) => v,
+        Err(e) => return internal_error(req.id, format!("serialization error: {e}")),
+    };
+    let resp = Response::ok(req.id, val);
+    inject_digest(resp, coordinator, &cwd(), None)
 }
 
 fn match_manager_error(
@@ -955,7 +1024,7 @@ mod tests {
         let instructions = &arr[0]["instructions"];
         assert!(instructions["open"].as_str().unwrap().contains(&f.path().display().to_string()));
 
-        let digest = coord.build_digest(&cwd());
+        let digest = coord.build_digest(&cwd(), None);
         assert_eq!(digest.external_count, 1);
     }
 
@@ -978,7 +1047,7 @@ mod tests {
         assert!(result["guidance"].as_str().unwrap().to_lowercase().contains("make"));
         assert!(result["session_id"].as_str().is_some());
 
-        let digest = coord.build_digest(&cwd());
+        let digest = coord.build_digest(&cwd(), None);
         assert_eq!(digest.native_count, 1);
     }
 
@@ -1133,7 +1202,7 @@ mod tests {
         );
         let resp = dispatch(req, &mgr, &reg, &coord);
         result_ok(&resp); // should succeed
-        assert_eq!(coord.build_digest(&cwd()).total_tracked, 0);
+        assert_eq!(coord.build_digest(&cwd(), None).total_tracked, 0);
     }
 
     #[test]

@@ -56,9 +56,11 @@ impl SessionManager {
         }
     }
 
-    /// Get a reference to the buffer pool.
-    pub fn pool(&self) -> &BufferPool {
-        &self.pool
+    /// Resolve a path to its canonical form.
+    ///
+    /// Delegates to the buffer pool's canonicalization cache.
+    pub fn canonical_path(&self, path: &Path) -> Result<std::path::PathBuf, ManagerError> {
+        self.pool.canonicalize(path).map_err(|e| ManagerError::Session(e.into()))
     }
 
     /// Create a new session, opening the given files.
@@ -102,10 +104,13 @@ impl SessionManager {
         id: &SessionId,
         force: bool,
     ) -> Result<FlushResult, ManagerError> {
-        // Step 1: Get target's file paths (read-only, releases shard lock on drop)
+        // Step 1: Get target's file paths (releases shard lock on drop).
+        // Touch the session first to prevent the sweeper from expiring it
+        // during the multi-step flush operation (TOCTOU fix).
         let target_file_paths: Vec<std::path::PathBuf> = {
-            let target = self.sessions.get(id)
+            let mut target = self.sessions.get_mut(id)
                 .ok_or_else(|| ManagerError::SessionNotFound(id.as_str().to_owned()))?;
+            target.touch();
             target.files.keys().cloned().collect()
         };
 
@@ -149,12 +154,20 @@ impl SessionManager {
             .filter(|entry| entry.value().is_expired(self.timeout))
             .map(|entry| entry.key().clone())
             .collect();
+        let mut swept = Vec::new();
         for id in &expired {
-            if let Some((_, session)) = self.sessions.remove(id) {
-                let _ = session.close(&self.pool);
+            if let Some((id, session)) = self.sessions.remove(id) {
+                if session.is_expired(self.timeout) {
+                    // Still expired — close it
+                    let _ = session.close(&self.pool);
+                    swept.push(id);
+                } else {
+                    // Was touched since we checked — put it back
+                    self.sessions.insert(id, session);
+                }
             }
         }
-        Ok(expired)
+        Ok(swept)
     }
 
     /// Number of active sessions.
