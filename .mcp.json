@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "slipstream": {
+      "command": "/Users/scottmeyer/projects/slipstream/target/release/slipstream-mcp",
+      "args": []
+    }
+  }
+}
