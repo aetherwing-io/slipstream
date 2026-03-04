@@ -100,6 +100,29 @@ impl FileHandle {
         self.edits.len()
     }
 
+    /// Get buffer lines with all pending edits applied (virtual view).
+    pub fn materialized_lines(&self) -> Vec<String> {
+        let buf = self.buffer.read();
+        if self.edits.is_empty() {
+            return buf.lines.clone();
+        }
+        let mut lines = buf.lines.clone();
+        let mut edits = self.edits.clone();
+        crate::edit::sort_bottom_up(&mut edits);
+        crate::edit::apply_edits(&mut lines, edits);
+        lines
+    }
+
+    /// Clear all pending edits.
+    pub fn clear_edits(&mut self) {
+        self.edits.clear();
+    }
+
+    /// Original buffer line count (before any edits).
+    pub fn original_line_count(&self) -> usize {
+        self.buffer.read().lines.len()
+    }
+
     /// Get the dirty ranges (line ranges with pending edits).
     pub fn dirty_ranges(&self) -> Vec<(usize, usize)> {
         self.edits.iter().map(|e| e.range()).collect()
@@ -302,6 +325,32 @@ impl Session {
         }
 
         Ok((first_match, match_count, handle.pending_edit_count()))
+    }
+
+    /// Apply replace_all against externally-provided lines (not the buffer).
+    /// Mutates `lines` in-place. Returns (first_match_line, match_count).
+    pub fn str_replace_on_materialized(
+        lines: &mut Vec<String>,
+        old_str: &str,
+        new_str: &str,
+    ) -> Result<(usize, usize), SessionError> {
+        if old_str.is_empty() {
+            return Err(StrReplaceError::EmptySearch.into());
+        }
+        let result = str_match::find_str_in_lines(lines, old_str);
+        if result.matches.is_empty() {
+            return Ok((0, 0));
+        }
+        let first_match = result.matches[0].start_line;
+        let match_count = result.matches.len();
+
+        let mut matches = result.matches;
+        matches.sort_unstable_by(|a, b| b.start_line.cmp(&a.start_line));
+        for m in &matches {
+            let (start, end, new_lines) = str_match::compute_replacement(lines, m, new_str);
+            lines.splice(start..end, new_lines);
+        }
+        Ok((first_match, match_count))
     }
 
     /// Close the session, releasing all buffer references.

@@ -177,6 +177,10 @@ impl Op {
     pub fn is_mutation(&self) -> bool {
         matches!(self, Op::Write { .. } | Op::StrReplace { .. })
     }
+
+    pub fn is_replace_all(&self) -> bool {
+        matches!(self, Op::StrReplace { replace_all: true, .. })
+    }
 }
 
 // --- Conflict error data ---

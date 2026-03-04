@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -669,10 +670,23 @@ fn handle_batch(
     let op_count = ops.len();
     let results: Result<Vec<OpResult>, _> =
         mgr.with_session_mut(&session_id, |session| {
-            let mut results = Vec::with_capacity(op_count);
+            // Partition ops: phase1 (non-replace_all) vs phase2 (replace_all)
+            let mut phase1_ops: Vec<(usize, Op)> = Vec::new();
+            let mut phase2_ops: Vec<(usize, Op)> = Vec::new();
             for (idx, op) in ops.into_iter().enumerate() {
+                if op.is_replace_all() {
+                    phase2_ops.push((idx, op));
+                } else {
+                    phase1_ops.push((idx, op));
+                }
+            }
+
+            let mut results: Vec<Option<OpResult>> = (0..op_count).map(|_| None).collect();
+
+            // Phase 1: Execute non-replace_all ops (queue edits on original buffer)
+            for (idx, op) in phase1_ops {
                 match dispatch_op(session, op, mgr) {
-                    Ok(result) => results.push(result),
+                    Ok(result) => results[idx] = Some(result),
                     Err(e) => {
                         return Err(ManagerError::BatchOpFailed {
                             index: idx,
@@ -682,6 +696,64 @@ fn handle_batch(
                     }
                 }
             }
+
+            // Phase 2: Execute replace_all ops against materialized buffer
+            if !phase2_ops.is_empty() {
+                let mut phase2_by_file: HashMap<PathBuf, Vec<(usize, String, String)>> =
+                    HashMap::new();
+                for (idx, op) in phase2_ops {
+                    if let Op::StrReplace {
+                        path,
+                        old_str,
+                        new_str,
+                        ..
+                    } = op
+                    {
+                        phase2_by_file
+                            .entry(path)
+                            .or_default()
+                            .push((idx, old_str, new_str));
+                    }
+                }
+
+                for (path, ops_for_file) in phase2_by_file {
+                    let handle = session.file_mut(&path)?;
+                    let original_len = handle.original_line_count();
+                    let mut materialized = handle.materialized_lines();
+                    handle.clear_edits();
+
+                    for (idx, old_str, new_str) in ops_for_file {
+                        let (match_line, match_count) =
+                            slipstream_core::session::Session::str_replace_on_materialized(
+                                &mut materialized,
+                                &old_str,
+                                &new_str,
+                            )
+                            .map_err(|e| ManagerError::BatchOpFailed {
+                                index: idx,
+                                total: op_count,
+                                source: Box::new(ManagerError::Session(e)),
+                            })?;
+
+                        let dirty = mgr
+                            .canonical_path(&path)
+                            .ok()
+                            .map(|c| (c, 1));
+                        results[idx] = Some(OpResult::StrReplace {
+                            edits_pending: 1,
+                            match_line,
+                            match_count,
+                            dirty,
+                        });
+                    }
+
+                    // Queue single edit replacing entire file with final content
+                    handle.queue_edit(0, original_len, materialized);
+                }
+            }
+
+            let results: Vec<OpResult> =
+                results.into_iter().map(|r| r.unwrap()).collect();
             Ok(results)
         });
 
@@ -1461,5 +1533,188 @@ mod tests {
             other.is_none() || other.unwrap().as_array().unwrap().is_empty(),
             "should have no other_sessions when alone"
         );
+    }
+
+    #[test]
+    fn batch_replace_all_sees_prior_str_replace() {
+        // The benchmark scenario: multi-line str_replace inserts a copyright header
+        // at lines 0-2, and replace_all renames a function throughout the file.
+        // Without two-phase, the large edit overwrites the rename.
+        let f = temp_file("import { get_connection } from 'db';\nconst pool = get_connection();\nfunction main() {\n  const db = get_connection();\n  return db;\n}\n");
+        let (sid, mgr, reg, coord) = open_session(&[&f]);
+
+        let req = make_request(
+            "batch",
+            serde_json::json!({
+                "session_id": sid,
+                "ops": [
+                    {
+                        "method": "file.str_replace",
+                        "path": f.path(),
+                        "old_str": "import { get_connection } from 'db';\nconst pool = get_connection();",
+                        "new_str": "// Copyright 2026\nimport { acquire_connection } from 'db';\nconst pool = acquire_connection();",
+                        "replace_all": false
+                    },
+                    {
+                        "method": "file.str_replace",
+                        "path": f.path(),
+                        "old_str": "get_connection",
+                        "new_str": "acquire_connection",
+                        "replace_all": true
+                    }
+                ]
+            }),
+        );
+        let resp = dispatch(req, &mgr, &reg, &coord);
+        let results = result_ok(&resp);
+        let arr = results.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+
+        // replace_all should have found the remaining occurrence in the function body
+        let replace_all_result = &arr[1];
+        assert!(replace_all_result["match_count"].as_u64().unwrap() >= 1);
+
+        // Flush and verify the file content
+        let flush_req = make_request(
+            "session.flush",
+            serde_json::json!({"session_id": sid}),
+        );
+        let flush_resp = dispatch(flush_req, &mgr, &reg, &coord);
+        assert!(flush_resp.error.is_none(), "flush should succeed");
+
+        let content = std::fs::read_to_string(f.path()).unwrap();
+        assert!(
+            !content.contains("get_connection"),
+            "all occurrences should be renamed, got: {content}"
+        );
+        assert!(content.contains("acquire_connection"));
+        assert!(content.contains("// Copyright 2026"));
+    }
+
+    #[test]
+    fn batch_replace_all_only_unchanged() {
+        // replace_all with no other ops works identically to current behavior
+        let f = temp_file("hello world\nfoo bar\nhello again\n");
+        let (sid, mgr, reg, coord) = open_session(&[&f]);
+
+        let req = make_request(
+            "batch",
+            serde_json::json!({
+                "session_id": sid,
+                "ops": [
+                    {
+                        "method": "file.str_replace",
+                        "path": f.path(),
+                        "old_str": "hello",
+                        "new_str": "goodbye",
+                        "replace_all": true
+                    }
+                ]
+            }),
+        );
+        let resp = dispatch(req, &mgr, &reg, &coord);
+        let results = result_ok(&resp);
+        let arr = results.as_array().unwrap();
+        assert_eq!(arr[0]["match_count"].as_u64().unwrap(), 2);
+
+        let flush_req = make_request(
+            "session.flush",
+            serde_json::json!({"session_id": sid}),
+        );
+        dispatch(flush_req, &mgr, &reg, &coord);
+
+        let content = std::fs::read_to_string(f.path()).unwrap();
+        assert!(!content.contains("hello"));
+        assert!(content.contains("goodbye world"));
+        assert!(content.contains("goodbye again"));
+    }
+
+    #[test]
+    fn batch_multiple_replace_all_same_file() {
+        // Two replace_all ops on same file, both applied correctly
+        let f = temp_file("aaa bbb\nccc aaa\nbbb ddd\n");
+        let (sid, mgr, reg, coord) = open_session(&[&f]);
+
+        let req = make_request(
+            "batch",
+            serde_json::json!({
+                "session_id": sid,
+                "ops": [
+                    {
+                        "method": "file.str_replace",
+                        "path": f.path(),
+                        "old_str": "aaa",
+                        "new_str": "AAA",
+                        "replace_all": true
+                    },
+                    {
+                        "method": "file.str_replace",
+                        "path": f.path(),
+                        "old_str": "bbb",
+                        "new_str": "BBB",
+                        "replace_all": true
+                    }
+                ]
+            }),
+        );
+        let resp = dispatch(req, &mgr, &reg, &coord);
+        let results = result_ok(&resp);
+        let arr = results.as_array().unwrap();
+        assert_eq!(arr[0]["match_count"].as_u64().unwrap(), 2);
+        assert_eq!(arr[1]["match_count"].as_u64().unwrap(), 2);
+
+        let flush_req = make_request(
+            "session.flush",
+            serde_json::json!({"session_id": sid}),
+        );
+        dispatch(flush_req, &mgr, &reg, &coord);
+
+        let content = std::fs::read_to_string(f.path()).unwrap();
+        assert_eq!(content, "AAA BBB\nccc AAA\nBBB ddd\n");
+    }
+
+    #[test]
+    fn batch_replace_all_with_write_op() {
+        // Write op + replace_all, verify replace_all sees written content
+        let f = temp_file("line0\nline1\nline2\n");
+        let (sid, mgr, reg, coord) = open_session(&[&f]);
+
+        let req = make_request(
+            "batch",
+            serde_json::json!({
+                "session_id": sid,
+                "ops": [
+                    {
+                        "method": "file.write",
+                        "path": f.path(),
+                        "start": 1,
+                        "end": 2,
+                        "content": ["new_line1 with target_word"]
+                    },
+                    {
+                        "method": "file.str_replace",
+                        "path": f.path(),
+                        "old_str": "target_word",
+                        "new_str": "REPLACED",
+                        "replace_all": true
+                    }
+                ]
+            }),
+        );
+        let resp = dispatch(req, &mgr, &reg, &coord);
+        let results = result_ok(&resp);
+        let arr = results.as_array().unwrap();
+        // replace_all should find the target_word that was introduced by the write
+        assert_eq!(arr[1]["match_count"].as_u64().unwrap(), 1);
+
+        let flush_req = make_request(
+            "session.flush",
+            serde_json::json!({"session_id": sid}),
+        );
+        dispatch(flush_req, &mgr, &reg, &coord);
+
+        let content = std::fs::read_to_string(f.path()).unwrap();
+        assert!(content.contains("REPLACED"));
+        assert!(!content.contains("target_word"));
     }
 }
