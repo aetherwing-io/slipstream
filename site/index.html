@@ -491,8 +491,8 @@
     <div class="hero-wordmark"><span class="mu">s//</span>slipstream</div>
     <div class="hero-tag">the in-memory editing daemon</div>
     <p class="hero-desc">Four MCP tools that give your agent persistent file sessions, batch edits, and conflict-safe writes. One daemon. No dependencies.</p>
-    <div class="hero-terminal"><span class="tp">$</span> <span class="tc">npx slipstream@latest</span>
-<span class="tp">$</span> <span class="tc">claude mcp add slipstream -- npx slipstream@latest</span></div>
+    <div class="hero-terminal"><span class="tp">$</span> <span class="tc">curl -fsSL https://slipstream.sh/install.sh | sh</span>
+<span class="tp">$</span> <span class="tc">claude mcp add slipstream -- slipstream-mcp</span></div>
     <div class="hero-cta">
       <a href="https://github.com/aetherwing-io/slipstream" class="btn btn-ghost">Source</a>
       <a href="#get-started" class="btn btn-text">Get started &#8594;</a>
@@ -505,19 +505,31 @@
   <!-- 01 GET STARTED -->
   <section id="get-started" class="section">
     <div class="section-num">01 GET STARTED</div>
-    <h2 class="section-title">One command to <strong>four tools</strong></h2>
-    <p class="section-desc">Register slipstream as an MCP server, restart your client. That's it.</p>
+    <h2 class="section-title">Two commands to <strong>four tools</strong></h2>
+    <p class="section-desc">Install the binary, register it as an MCP server, restart your client. That's it.</p>
 
     <div class="term">
       <div class="term-bar">
         <div class="td"></div><div class="td"></div><div class="td"></div>
-        <div class="term-title">install + connect</div>
+        <div class="term-title">install</div>
+      </div>
+      <div class="term-body"><span class="tm"># macOS (Apple Silicon + Intel) and Linux</span>
+<span class="tp">$</span> <span class="tc">curl -fsSL https://slipstream.sh/install.sh | sh</span>
+
+<span class="tm"># or from source</span>
+<span class="tp">$</span> <span class="tc">cargo install --git https://github.com/aetherwing-io/slipstream</span></div>
+    </div>
+
+    <div class="term" style="margin-top: 16px;">
+      <div class="term-bar">
+        <div class="td"></div><div class="td"></div><div class="td"></div>
+        <div class="term-title">connect as MCP server</div>
       </div>
       <div class="term-body"><span class="tm"># Claude Code</span>
-<span class="tp">$</span> <span class="tc">claude mcp add slipstream -- npx slipstream@latest</span>
+<span class="tp">$</span> <span class="tc">claude mcp add slipstream -- slipstream-mcp</span>
 
 <span class="tm"># or any MCP client &#8212; add to your config:</span>
-<span class="tf">"slipstream"</span>: { <span class="tf">"command"</span>: <span class="ta">"npx"</span>, <span class="tf">"args"</span>: [<span class="ta">"slipstream@latest"</span>] }</div>
+<span class="tf">"slipstream"</span>: { <span class="tf">"command"</span>: <span class="ta">"slipstream-mcp"</span> }</div>
     </div>
 
     <p class="install-note">Restart your client. <strong>Four tools appear:</strong></p>
