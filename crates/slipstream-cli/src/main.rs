@@ -121,6 +121,9 @@ enum Command {
         ops: String,
     },
 
+    /// LLM/agent quick reference. If you are an AI agent, start here.
+    Agent,
+
     /// Open files, apply operations, optionally flush, and close — all in one call.
     /// Combines open + batch + flush + close into a single CLI invocation.
     Exec {
@@ -260,6 +263,11 @@ async fn run(
             })).await?
         }
 
+        Command::Agent => {
+            print!("{AGENT_REFERENCE}");
+            return Ok(());
+        }
+
         Command::Exec { files, ops, read_all, flush, force, no_batch } => {
             return run_exec(&mut client, files, ops, read_all, flush, force, no_batch).await;
         }
@@ -323,8 +331,10 @@ async fn run_exec(
     }
 
     // 3. Apply ops if provided
+    let mut saved_ops: Option<serde_json::Value> = None;
     if let Some(ops_str) = ops {
         let ops_value = parse_ops(&ops_str)?;
+        saved_ops = Some(ops_value.clone());
         if no_batch {
             let ops_array = ops_value.as_array().ok_or_else(|| ClientError::Rpc {
                 code: -1,
@@ -368,9 +378,72 @@ async fn run_exec(
     })).await?;
     output.insert("close".to_string(), close_result);
 
-    println!("{}", serde_json::to_string_pretty(&serde_json::Value::Object(output)).unwrap());
+    // Compact domain output
+    use slipstream_cli::format;
+    let text = format::format_one_shot(
+        &serde_json::Value::Object(output),
+        saved_ops.as_ref(),
+        read_all,
+    );
+    println!("{text}");
     Ok(())
 }
+
+const AGENT_REFERENCE: &str = r#"# Slipstream — Agent Quick Reference
+
+IF YOU ARE AN LLM/AI AGENT, USE `exec` FOR EVERYTHING.
+One command = open files + apply edits + flush + close.
+
+## Edit a file (str_replace)
+
+    slipstream exec --files src/main.rs --ops '[
+      {"method":"file.str_replace","path":"src/main.rs","old_str":"foo","new_str":"bar"}
+    ]' --flush
+
+## Edit multiple files
+
+    slipstream exec --files src/a.rs src/b.rs --ops '[
+      {"method":"file.str_replace","path":"src/a.rs","old_str":"x","new_str":"y"},
+      {"method":"file.str_replace","path":"src/b.rs","old_str":"x","new_str":"y"}
+    ]' --flush
+
+## Read a file
+
+    slipstream exec --files src/main.rs --read-all
+
+## Read then edit
+
+    slipstream exec --files src/main.rs --read-all --ops '[
+      {"method":"file.str_replace","path":"src/main.rs","old_str":"old","new_str":"new"}
+    ]' --flush
+
+## Insert lines (start==end inserts before that line)
+
+    slipstream exec --files f.rs --ops '[
+      {"method":"file.write","path":"f.rs","start":0,"end":0,"content":["// new header"]}
+    ]' --flush
+
+## Replace lines (start<end replaces that range)
+
+    slipstream exec --files f.rs --ops '[
+      {"method":"file.write","path":"f.rs","start":5,"end":8,"content":["new line 5","new line 6"]}
+    ]' --flush
+
+## Replace all occurrences
+
+    Add "replace_all":true to a str_replace op.
+
+## Key flags
+    --files     Files to open (required, space-separated)
+    --ops       JSON array of operations (inline, @file, or @- for stdin)
+    --read-all  Print file contents before applying ops
+    --flush     Write changes to disk (without this, edits are discarded)
+    --force     Override conflict detection on flush
+
+## Output
+    JSON object with open/read/batch/flush/close results.
+    Exit 0 on success, 1 on error (error JSON on stderr).
+"#;
 
 fn read_stdin_lines() -> Vec<String> {
     use std::io::BufRead;

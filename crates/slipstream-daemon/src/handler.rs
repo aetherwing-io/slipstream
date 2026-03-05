@@ -325,10 +325,21 @@ fn handle_session_open(
         .cloned()
         .collect();
 
-    let session_id: SessionId = uuid::Uuid::new_v4().to_string().into();
+    // Named session: reuse if exists, create if not.
+    let session_id: SessionId = params.name
+        .unwrap_or_else(|| {
+            let u = uuid::Uuid::new_v4().to_string();
+            u[..8].to_string()
+        })
+        .into();
     let path_refs: Vec<&Path> = all_paths.iter().map(|p| p.as_path()).collect();
 
-    if let Err(e) = mgr.create_session(session_id.clone(), &path_refs) {
+    if mgr.has_session(&session_id) {
+        // Existing session — add any new files
+        if let Err(e) = mgr.add_files_to_session(&session_id, &path_refs) {
+            return internal_error(req.id, format!("{e}"));
+        }
+    } else if let Err(e) = mgr.create_session(session_id.clone(), &path_refs) {
         return internal_error(req.id, format!("{e}"));
     }
 

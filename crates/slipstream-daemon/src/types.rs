@@ -8,6 +8,10 @@ use std::path::PathBuf;
 #[derive(Debug, Deserialize)]
 pub struct SessionOpenParams {
     pub files: Vec<PathBuf>,
+    /// Session name. If provided, reuses an existing session with the same
+    /// name (adding new files). If absent, generates a short random ID.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

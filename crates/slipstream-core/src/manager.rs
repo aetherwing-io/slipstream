@@ -82,6 +82,47 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Check whether a session with the given ID exists.
+    pub fn has_session(&self, id: &SessionId) -> bool {
+        self.sessions.contains_key(id)
+    }
+
+    /// Add files to an existing session.
+    ///
+    /// Files already in the session are silently skipped.
+    pub fn add_files_to_session(
+        &self,
+        id: &SessionId,
+        paths: &[&Path],
+    ) -> Result<(), ManagerError> {
+        let mut entry = self.sessions.get_mut(id)
+            .ok_or_else(|| ManagerError::SessionNotFound(id.as_str().to_owned()))?;
+        let session = entry.value_mut();
+        session.touch();
+        for path in paths {
+            let canonical = self.pool.canonicalize(path)
+                .map_err(|e| ManagerError::Session(SessionError::from(e)))?;
+            if session.files.contains_key(&canonical) {
+                continue;
+            }
+            let buf = self.pool.open(path)
+                .map_err(|e| ManagerError::Session(SessionError::from(e)))?;
+            let version = buf.read().version;
+            session.path_cache.insert(path.to_path_buf(), canonical.clone());
+            session.files.insert(
+                canonical.clone(),
+                crate::session::FileHandle {
+                    buffer: buf,
+                    snapshot_version: version,
+                    cursor: 0,
+                    edits: Vec::new(),
+                    path: canonical,
+                },
+            );
+        }
+        Ok(())
+    }
+
     /// Execute a closure with read access to a session.
     pub fn with_session<F, R>(&self, id: &SessionId, f: F) -> Result<R, ManagerError>
     where

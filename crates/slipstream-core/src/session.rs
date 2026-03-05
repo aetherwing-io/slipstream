@@ -141,7 +141,7 @@ pub struct Session {
     pub id: SessionId,
     pub files: HashMap<PathBuf, FileHandle>,
     /// Cache of raw path → canonical path for this session's files.
-    path_cache: HashMap<PathBuf, PathBuf>,
+    pub(crate) path_cache: HashMap<PathBuf, PathBuf>,
     pub(crate) status: SessionStatus,
     pub created_at: Instant,
     pub last_activity: Instant,
