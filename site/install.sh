@@ -55,17 +55,16 @@ main() {
   # Install both binaries
   mkdir -p "$INSTALL_DIR"
   mv "$tmpdir/slipstream" "$INSTALL_DIR/slipstream"
-  mv "$tmpdir/slipstream-mcp" "$INSTALL_DIR/slipstream-mcp"
-  chmod +x "$INSTALL_DIR/slipstream" "$INSTALL_DIR/slipstream-mcp"
+  chmod +x "$INSTALL_DIR/slipstream"
 
   printf "  installed to %s\n" "$INSTALL_DIR"
 
   # Verify
-  if "$INSTALL_DIR/slipstream-mcp" --version >/dev/null 2>&1; then
-    version=$("$INSTALL_DIR/slipstream-mcp" --version 2>&1)
+  if "$INSTALL_DIR/slipstream" --version >/dev/null 2>&1; then
+    version=$("$INSTALL_DIR/slipstream" --version 2>&1)
     printf "\n  + %s\n" "$version"
   else
-    printf "\n  + binaries installed (could not verify version)\n"
+    printf "\n  + slipstream installed (could not verify version)\n"
   fi
 
   # PATH check
@@ -78,7 +77,7 @@ main() {
   esac
 
   printf "\n  next: add to Claude Code:\n"
-  printf "    claude mcp add slipstream -- slipstream-mcp\n"
+  printf "    claude mcp add ss -- slipstream mcp\n"
   printf "\n"
 }
 
