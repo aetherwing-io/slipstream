@@ -57,6 +57,11 @@ main() {
   mv "$tmpdir/slipstream" "$INSTALL_DIR/slipstream"
   chmod +x "$INSTALL_DIR/slipstream"
 
+  # Backward compat: slipstream-mcp shim → slipstream mcp
+  # Users upgrading from v0.2.x may have "slipstream-mcp" in their MCP config
+  printf '#!/bin/sh\nexec "%s/slipstream" mcp "$@"\n' "$INSTALL_DIR" > "$INSTALL_DIR/slipstream-mcp"
+  chmod +x "$INSTALL_DIR/slipstream-mcp"
+
   printf "  installed to %s\n" "$INSTALL_DIR"
 
   # Verify
