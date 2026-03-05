@@ -191,39 +191,88 @@
   .anim-line.anim-output { border-left: 2px solid rgba(56,189,248,0.2); padding-left: 12px; margin-left: -14px; }
   .anim-line.anim-error { border-left: 2px solid rgba(239,68,68,0.4); padding-left: 12px; margin-left: -14px; }
   .anim-line.anim-status { border-left: 2px solid rgba(85,85,106,0.3); padding-left: 12px; margin-left: -14px; }
-  .anim-banner {
-    padding: 16px 24px;
-    font-family: var(--sans);
-    font-size: 14px;
-    font-weight: 300;
-    color: var(--secondary);
-    background: linear-gradient(135deg, rgba(14,165,168,0.04) 0%, rgba(56,189,248,0.02) 100%);
-    border-bottom: 1px solid var(--border);
-    line-height: 1.6;
-    min-height: 52px;
+  /* Glassmorphism overlay */
+  .anim-overlay {
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    z-index: 10;
     display: flex;
     align-items: center;
-    gap: 8px;
+    justify-content: center;
+    background: rgba(9,9,11,0.55);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    opacity: 1;
+    transition: opacity 0.5s ease;
+    pointer-events: none;
   }
-  .anim-banner strong {
+  .anim-overlay.hidden {
+    opacity: 0;
+  }
+  .anim-overlay-card {
+    background: linear-gradient(135deg, rgba(22,22,29,0.9) 0%, rgba(30,30,40,0.85) 100%);
+    border: 1px solid rgba(14,165,168,0.2);
+    border-radius: 14px;
+    padding: 28px 32px;
+    max-width: 480px;
+    width: 90%;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.4), 0 0 80px rgba(14,165,168,0.04);
+  }
+  .anim-overlay-intent {
+    font-family: var(--sans);
+    font-size: 18px;
+    font-weight: 400;
     color: var(--bright);
-    font-weight: 500;
+    line-height: 1.5;
+    margin-bottom: 16px;
   }
-  .anim-banner code {
+  .anim-overlay-intent strong {
+    font-weight: 600;
+    background: var(--current-text);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  .anim-overlay-flow {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--secondary);
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+  }
+  .anim-overlay-step {
     display: inline-flex;
     align-items: center;
-    justify-content: center;
-    font-family: var(--mono);
-    font-size: 13px;
-    font-weight: 600;
-    min-width: 24px;
-    height: 24px;
-    padding: 0 6px;
-    border-radius: 5px;
+    gap: 6px;
+    padding: 5px 10px;
     background: var(--elevated);
     border: 1px solid var(--border);
-    vertical-align: middle;
-    line-height: 1;
+    border-radius: 6px;
+    white-space: nowrap;
+  }
+  .anim-overlay-step .pip {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--cyan);
+    flex-shrink: 0;
+  }
+  .anim-overlay-arrow {
+    color: var(--muted);
+    font-size: 14px;
+  }
+  .anim-overlay-result {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.5px;
+    color: var(--muted);
+    text-transform: uppercase;
+  }
+  .anim-overlay-result .val {
+    color: var(--cyan);
+    font-weight: 600;
   }
   .anim-controls {
     display: flex;
@@ -589,8 +638,12 @@
         <div class="td"></div><div class="td"></div><div class="td"></div>
         <div class="term-title" id="anim-title">slipstream in action</div>
       </div>
-      <div class="anim-banner" id="anim-banner"></div>
-      <div class="term-body"><div class="anim-scroll" id="anim-body"></div></div>
+      <div class="term-body" style="position:relative;">
+        <div class="anim-overlay" id="anim-overlay">
+          <div class="anim-overlay-card" id="anim-overlay-card"></div>
+        </div>
+        <div class="anim-scroll" id="anim-body"></div>
+      </div>
       <div class="anim-controls">
         <div class="anim-tabs" id="anim-tabs">
           <button class="anim-tab active" data-mode="mcp">MCP</button>
@@ -772,7 +825,11 @@
   var SCENES = [
     {
       title: 'quick edit',
-      banner: 'Edit <strong>one string</strong> in one file. Opens, replaces, saves, and closes &mdash; all in a single call.',
+      overlay: {
+        intent: 'Add a <strong>logging import</strong> to config_loader.py',
+        flow: ['open file', 'find &amp; replace', 'save to disk', 'close'],
+        result: '<span class="val">1</span> tool call &middot; <span class="val">1</span> file &middot; <span class="val">1</span> edit'
+      },
       mcp: [
         { t: 'c', s: '# one edit, one call' },
         { t: '>', s: 'ss(path="config_loader.py", old_str="import json",' },
@@ -797,7 +854,11 @@
     },
     {
       title: 'batch — 5 ops, 3 files',
-      banner: 'Insert copyright headers and rename functions across <strong>3 files</strong> &mdash; still one call. Each <code style="color:var(--ice)">~</code> is an applied edit.',
+      overlay: {
+        intent: 'Add <strong>copyright headers</strong> and <strong>rename functions</strong> across 3 files',
+        flow: ['open 3 files', '3 writes + 2 replaces', 'save all', 'close'],
+        result: '<span class="val">1</span> tool call &middot; <span class="val">3</span> files &middot; <span class="val">5</span> edits'
+      },
       mcp: [
         { t: 'c', s: '# 5 ops across 3 files, one tool call' },
         { t: '>', s: 'ss(ops=[' },
@@ -835,7 +896,11 @@
     },
     {
       title: 'read file',
-      banner: 'Read a file range. The <code style="color:var(--ice)">@</code> header shows what you got, then raw content follows &mdash; no JSON wrapping.',
+      overlay: {
+        intent: 'Read <strong>lines 0&ndash;8</strong> of auth_service.py',
+        flow: ['open file', 'read range', 'return content'],
+        result: '<span class="val">8</span> lines &middot; raw text, no JSON wrapping'
+      },
       mcp: [
         { t: 'c', s: '# read — no session setup needed' },
         { t: '>', s: 'ss_session("read auth_service.py start:0 end:8")' },
@@ -869,7 +934,11 @@
     },
     {
       title: 'error handling',
-      banner: 'When an edit fails, you see exactly which op and why. The <code style="color:var(--error)">!</code> marks the error. Status bar counts it.',
+      overlay: {
+        intent: 'Rename a function in <strong>2 files</strong> &mdash; but one target doesn&rsquo;t exist',
+        flow: ['open 2 files', '1st edit ✔', '2nd edit ✘', 'report error'],
+        result: '<span class="val">1</span> success &middot; <span class="val">1</span> error &middot; status bar shows <span style="color:var(--error)">!1err</span>'
+      },
       mcp: [
         { t: 'c', s: '# errors inline — no exception walls' },
         { t: '>', s: 'ss(ops=[' },
@@ -904,7 +973,8 @@
   var progress = document.getElementById('anim-progress');
   var tabs = document.getElementById('anim-tabs');
   var titleEl = document.getElementById('anim-title');
-  var bannerEl = document.getElementById('anim-banner');
+  var overlayEl = document.getElementById('anim-overlay');
+  var overlayCard = document.getElementById('anim-overlay-card');
   var currentScene = 0;
   var currentMode = 'mcp';
   var animTimeout = null;
@@ -988,9 +1058,21 @@
     var scene = SCENES[idx];
     var lines = scene[currentMode];
     titleEl.textContent = scene.title + ' \u2014 ' + currentMode.toUpperCase();
-    bannerEl.innerHTML = scene.banner || '';
     body.innerHTML = '';
     var lineIdx = 0;
+
+    // Build and show overlay
+    var ov = scene.overlay;
+    if (ov) {
+      var flowHtml = ov.flow.map(function(step) {
+        return '<span class="anim-overlay-step"><span class="pip"></span>' + step + '</span>';
+      }).join('<span class="anim-overlay-arrow">\u2192</span>');
+      overlayCard.innerHTML =
+        '<div class="anim-overlay-intent">' + ov.intent + '</div>' +
+        '<div class="anim-overlay-flow">' + flowHtml + '</div>' +
+        '<div class="anim-overlay-result">' + ov.result + '</div>';
+      overlayEl.classList.remove('hidden');
+    }
 
     function addLine(html, cls) {
       var el = document.createElement('span');
@@ -1013,6 +1095,11 @@
 
       var line = lines[lineIdx];
       lineIdx++;
+
+      // Fade overlay on first typed line
+      if (isTyped(line.t) && !overlayEl.classList.contains('hidden')) {
+        overlayEl.classList.add('hidden');
+      }
 
       if (isTyped(line.t)) {
         var prompt = line.t === '>' ? '\u276f' : '$';
@@ -1049,7 +1136,8 @@
       }
     }
 
-    animTimeout = setTimeout(nextLine, 300);
+    // Hold overlay visible for reading, then start typing
+    animTimeout = setTimeout(nextLine, 2500);
   }
 
   playScene(0);
