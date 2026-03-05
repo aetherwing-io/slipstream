@@ -5,13 +5,13 @@ use clap::{Parser, Subcommand};
 use slipstream_cli::client::{self, Client, ClientError};
 
 #[derive(Parser)]
-#[command(name = "slipstream", about = "CLI client for the Slipstream editing daemon")]
+#[command(name = "slipstream", about = "Slipstream file editing daemon")]
 struct Cli {
-    /// Path to the daemon's Unix socket
+    /// Unix socket path
     #[arg(long, env = "SLIPSTREAM_SOCKET")]
     socket: Option<PathBuf>,
 
-    /// Don't auto-start the daemon if it isn't running
+    /// Skip daemon auto-start
     #[arg(long)]
     no_auto_start: bool,
 
@@ -21,22 +21,20 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Open a session with one or more files
+    /// Open session with files
     Open {
-        /// File paths to open
         files: Vec<PathBuf>,
     },
 
-    /// Read lines from a file in an active session
+    /// Read lines from a file
     Read {
-        /// Session ID
+        /// Session ID (omit to auto-open and close)
         #[arg(short, long)]
-        session: String,
+        session: Option<String>,
 
-        /// File path
         path: PathBuf,
 
-        /// Start line (0-indexed, inclusive)
+        /// Start line (0-indexed)
         #[arg(long)]
         start: Option<usize>,
 
@@ -44,21 +42,19 @@ enum Command {
         #[arg(long)]
         end: Option<usize>,
 
-        /// Number of lines to read from cursor
+        /// Lines from cursor
         #[arg(short = 'n', long)]
         count: Option<usize>,
     },
 
-    /// Write lines to a file in an active session
+    /// Write lines to a file
     Write {
-        /// Session ID
         #[arg(short, long)]
         session: String,
 
-        /// File path
         path: PathBuf,
 
-        /// Start line (0-indexed, inclusive)
+        /// Start line
         #[arg(long)]
         start: usize,
 
@@ -66,100 +62,88 @@ enum Command {
         #[arg(long)]
         end: usize,
 
-        /// Content lines (repeatable)
+        /// Content lines
         #[arg(short, long)]
         content: Vec<String>,
 
-        /// Read content lines from stdin instead of -c flags
+        /// Read content from stdin
         #[arg(long)]
         stdin: bool,
     },
 
-    /// Move the cursor for a file in an active session
+    /// Move cursor
     Cursor {
-        /// Session ID
         #[arg(short, long)]
         session: String,
-
-        /// File path
         path: PathBuf,
-
-        /// Target line number
         #[arg(long)]
         to: usize,
     },
 
-    /// Flush pending edits to disk
+    /// Flush edits to disk
     Flush {
-        /// Session ID
         #[arg(short, long)]
         session: String,
-
-        /// Force flush even if conflicts detected
+        /// Override conflicts
         #[arg(long)]
         force: bool,
     },
 
-    /// Close a session and release resources
+    /// Close session
     Close {
-        /// Session ID
         #[arg(short, long)]
         session: String,
     },
 
-    /// List active sessions with file counts
+    /// List sessions
     List,
 
-    /// Execute a batch of operations in a single round trip
+    /// Batch operations in one call
     Batch {
-        /// Session ID
         #[arg(short, long)]
         session: String,
-
-        /// Operations as JSON array (inline or @file)
+        /// JSON array (inline or @file)
         #[arg(long)]
         ops: String,
     },
 
-    /// LLM/agent quick reference. If you are an AI agent, start here.
+    /// Agent quick reference
     Agent,
 
-    /// Open files, apply operations, optionally flush, and close — all in one call.
-    /// Combines open + batch + flush + close into a single CLI invocation.
+    /// Open + edit + flush + close in one call
     Exec {
-        /// File paths to open
+        /// Files to open
         #[arg(long, required = true, num_args = 1..)]
         files: Vec<PathBuf>,
 
-        /// Operations as JSON array (inline, @file, or @- for stdin)
+        /// JSON ops (inline, @file, @- stdin)
         #[arg(long)]
         ops: Option<String>,
 
-        /// Read all opened files before applying ops
+        /// Read files before ops
         #[arg(long)]
         read_all: bool,
 
-        /// Flush edits to disk after applying ops
+        /// Write changes to disk
         #[arg(long)]
         flush: bool,
 
-        /// Force flush even if conflicts detected
+        /// Override conflicts
         #[arg(long)]
         force: bool,
 
-        /// Send individual RPC calls per op instead of a single batch call.
-        /// Tests the standalone handler path (both paths call the same dispatch_op).
-        #[arg(long)]
+        /// Skip batching (debug)
+        #[arg(long, hide = true)]
         no_batch: bool,
     },
 
-    /// Start the daemon (listens on Unix socket)
+    /// Start daemon
     Daemon {
-        /// Socket path (overrides default)
+        /// Socket path
         socket: Option<PathBuf>,
     },
 
-    /// Start the MCP stdio server
+    /// Start MCP stdio server
     Mcp,
 }
 
@@ -228,8 +212,25 @@ async fn run(
         }
 
         Command::Read { session, path, start, end, count } => {
+            let (session_id, auto_opened) = match session {
+                Some(s) => (s, false),
+                None => {
+                    let path_str = path.to_str().unwrap_or_default();
+                    let open_result = client.request("session.open", serde_json::json!({ "files": [path_str] })).await?;
+                    let sid = open_result["session_id"]
+                        .as_str()
+                        .ok_or_else(|| ClientError::Rpc {
+                            code: -1,
+                            message: "session.open did not return session_id".to_string(),
+                            data: None,
+                        })?
+                        .to_string();
+                    (sid, true)
+                }
+            };
+
             let mut params = serde_json::json!({
-                "session_id": session,
+                "session_id": session_id,
                 "path": path,
             });
             if let (Some(s), Some(e)) = (start, end) {
@@ -238,7 +239,15 @@ async fn run(
             } else if let Some(n) = count {
                 params["count"] = serde_json::json!(n);
             }
-            client.request("file.read", params).await?
+            let result = client.request("file.read", params).await?;
+
+            if auto_opened {
+                let _ = client.request("session.close", serde_json::json!({
+                    "session_id": session_id,
+                })).await;
+            }
+
+            result
         }
 
         Command::Write { session, path, start, end, content, stdin } => {
