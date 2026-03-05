@@ -3,10 +3,10 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>slipstream — The in-memory editing daemon</title>
-<meta name="description" content="Four MCP tools that give your agent persistent file sessions, batch edits, and conflict-safe writes. One daemon. No dependencies.">
-<meta property="og:title" content="slipstream — The in-memory editing daemon">
-<meta property="og:description" content="Four MCP tools that give your agent persistent file sessions, batch edits, and conflict-safe writes. One daemon. No dependencies.">
+<title>slipstream — file session coordinator</title>
+<meta name="description" content="Three MCP tools that give your agent self-contained batch edits, persistent file sessions, and conflict-safe writes. One daemon. No dependencies.">
+<meta property="og:title" content="slipstream — file session coordinator">
+<meta property="og:description" content="Three MCP tools that give your agent self-contained batch edits, persistent file sessions, and conflict-safe writes. One daemon. No dependencies.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://slipstream.sh">
 <meta property="og:image" content="https://slipstream.sh/og.png">
@@ -14,8 +14,8 @@
 <meta property="og:image:height" content="640">
 <meta property="og:image:type" content="image/png">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="slipstream — The in-memory editing daemon">
-<meta name="twitter:description" content="Four MCP tools that give your agent persistent file sessions, batch edits, and conflict-safe writes. One daemon. No dependencies.">
+<meta name="twitter:title" content="slipstream — file session coordinator">
+<meta name="twitter:description" content="Three MCP tools that give your agent self-contained batch edits, persistent file sessions, and conflict-safe writes. One daemon. No dependencies.">
 <meta name="twitter:image" content="https://slipstream.sh/og.png">
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%2316161d'/%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='64' y2='64' gradientUnits='userSpaceOnUse'%3E%3Cstop stop-color='%230ea5a8'/%3E%3Cstop offset='.4' stop-color='%2314b8a6'/%3E%3Cstop offset='1' stop-color='%2338bdf8'/%3E%3C/linearGradient%3E%3C/defs%3E%3Ctext x='32' y='43' text-anchor='middle' font-family='monospace' font-size='22' font-weight='700' fill='url(%23g)'%3Es//%3C/text%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -157,16 +157,81 @@
   .tok { color: var(--success); }
   .terr { color: var(--error); }
   .tw { color: var(--warn); }
-  .cursor-blink {
+
+  /* Animated terminal */
+  .anim-term .term-body {
+    height: 340px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    position: relative;
+    scrollbar-width: none;
+  }
+  .anim-term .term-body::-webkit-scrollbar { display: none; }
+  .anim-scroll {
+    min-height: 100%;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    padding: 24px;
+  }
+  .anim-cursor {
     display: inline-block;
     width: 8px; height: 16px;
     background: var(--cyan);
-    opacity: 0.7;
+    opacity: 0.8;
     animation: blink 1.1s step-end infinite;
     vertical-align: text-bottom;
     border-radius: 1px;
+    margin-left: 1px;
   }
   @keyframes blink { 50% { opacity: 0; } }
+
+  .anim-line { display: block; min-height: 1.7em; }
+  .anim-line.response { opacity: 0; transition: opacity 0.15s; }
+  .anim-line.response.visible { opacity: 1; }
+  .anim-controls {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 18px;
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+  }
+  .anim-tabs {
+    display: flex;
+    gap: 2px;
+  }
+  .anim-tab {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.5px;
+    padding: 5px 12px;
+    border-radius: 4px;
+    color: var(--muted);
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .anim-tab:hover { color: var(--secondary); }
+  .anim-tab.active {
+    color: var(--bright);
+    background: var(--elevated);
+  }
+  .anim-progress {
+    display: flex;
+    gap: 6px;
+  }
+  .anim-dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--border);
+    transition: background 0.3s;
+    cursor: pointer;
+  }
+  .anim-dot.active {
+    background: var(--cyan);
+  }
 
   /* Spec table */
   .spec-table {
@@ -195,6 +260,13 @@
     border-bottom: 1px solid rgba(42,42,56,0.4);
   }
   .spec-table td.val { color: var(--cyan); font-weight: 600; }
+  .spec-table td.g-val {
+    font-weight: 700;
+    background: linear-gradient(135deg, #2dd4bf 0%, #7dd3fc 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
   .spec-table tr:last-child td { border-bottom: none; }
   .spec-table .how {
     font-family: var(--sans);
@@ -281,32 +353,13 @@
     max-width: 480px;
     margin: 0 auto 36px;
   }
-  .hero-terminal {
-    display: inline-block;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 14px 28px;
-    font-family: var(--mono);
-    font-size: 13px;
-    line-height: 1.8;
-    text-align: left;
-    margin-bottom: 36px;
-    white-space: pre;
-    max-width: 100%;
-    overflow-x: auto;
-    cursor: pointer;
-    transition: border-color 0.2s;
-  }
-  .hero-terminal:hover {
-    border-color: var(--cyan);
-  }
   .hero-cta {
     display: flex;
     align-items: center;
     justify-content: center;
     gap: 16px;
     flex-wrap: wrap;
+    margin-top: 36px;
   }
 
   /* Buttons */
@@ -376,13 +429,7 @@
     line-height: 1.6;
   }
 
-  /* Mockup stack */
-  .mockup-stack {
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-    margin-top: 32px;
-  }
+  /* Mockup note */
   .mockup-note {
     font-family: var(--sans);
     font-size: 14px;
@@ -476,7 +523,6 @@
     .hero-wordmark { font-size: 52px; letter-spacing: -2px; }
     .hero-tag { font-size: 11px; letter-spacing: 2px; }
     .hero-desc { font-size: 15px; }
-    .hero-terminal { font-size: 11px; padding: 12px 16px; }
     .container { padding: 0 24px; }
     .section { margin-bottom: 72px; }
     .section-title { font-size: 22px; }
@@ -484,6 +530,7 @@
     .spec-table { font-size: 12px; }
     .spec-table th, .spec-table td { padding: 10px 14px; }
     .term-body { font-size: 11px; padding: 16px; }
+    .anim-term .term-body { min-height: 160px; }
     .footer-inner { flex-direction: column; gap: 24px; text-align: center; }
     .footer-links { flex-wrap: wrap; justify-content: center; }
   }
@@ -495,10 +542,25 @@
 <header class="hero">
   <div class="hero-inner">
     <div class="hero-wordmark"><span class="mu">s//</span>slipstream</div>
-    <div class="hero-tag">the in-memory editing daemon</div>
-    <p class="hero-desc">Four MCP tools that give your agent persistent file sessions, batch edits, and conflict-safe writes. One daemon. No dependencies.</p>
-    <div class="hero-terminal" role="button" tabindex="0" title="Click to copy" onclick="copyInstall(this)"><span class="tp">$</span> <span class="tc">curl -fsSL https://slipstream.sh/install.sh | sh</span>
-<span class="tp">$</span> <span class="tc">claude mcp add slipstream -- slipstream-mcp</span></div>
+    <div class="hero-tag">file session coordinator</div>
+    <p class="hero-desc">Three MCP tools that give your agent self-contained batch edits, persistent file sessions, and conflict-safe writes. One daemon. Zero dependencies.</p>
+
+    <!-- Animated demo terminal -->
+    <div class="term anim-term" style="display:inline-block;text-align:left;max-width:720px;width:100%;margin:0 auto;">
+      <div class="term-bar">
+        <div class="td"></div><div class="td"></div><div class="td"></div>
+        <div class="term-title" id="anim-title">slipstream in action</div>
+      </div>
+      <div class="term-body"><div class="anim-scroll" id="anim-body"></div></div>
+      <div class="anim-controls">
+        <div class="anim-tabs" id="anim-tabs">
+          <button class="anim-tab active" data-mode="mcp">MCP</button>
+          <button class="anim-tab" data-mode="cli">CLI</button>
+        </div>
+        <div class="anim-progress" id="anim-progress"></div>
+      </div>
+    </div>
+
     <div class="hero-cta">
       <a href="https://github.com/aetherwing-io/slipstream" class="btn btn-ghost">Source</a>
       <a href="#get-started" class="btn btn-text">Get started &#8594;</a>
@@ -511,7 +573,7 @@
   <!-- 01 GET STARTED -->
   <section id="get-started" class="section">
     <div class="section-num">01 GET STARTED</div>
-    <h2 class="section-title">Two commands to <strong>four tools</strong></h2>
+    <h2 class="section-title">Two commands to <strong>three tools</strong></h2>
     <p class="section-desc">Install the binary, register it as an MCP server, restart your client. That's it.</p>
 
     <div class="term">
@@ -532,13 +594,13 @@
         <div class="term-title">connect as MCP server</div>
       </div>
       <div class="term-body"><span class="tm"># Claude Code</span>
-<span class="tp">$</span> <span class="tc">claude mcp add slipstream -- slipstream-mcp</span>
+<span class="tp">$</span> <span class="tc">claude mcp add ss -- slipstream-mcp</span>
 
 <span class="tm"># or any MCP client &#8212; add to your config:</span>
-<span class="tf">"slipstream"</span>: { <span class="tf">"command"</span>: <span class="ta">"slipstream-mcp"</span> }</div>
+<span class="tf">"ss"</span>: { <span class="tf">"command"</span>: <span class="ta">"slipstream-mcp"</span> }</div>
     </div>
 
-    <p class="install-note">Restart your client. <strong>Four tools appear:</strong></p>
+    <p class="install-note">Restart your client. <strong>Three tools appear:</strong></p>
 
     <table class="spec-table" style="margin-top: 20px;">
       <thead>
@@ -546,20 +608,16 @@
       </thead>
       <tbody>
         <tr>
-          <td class="val">slipstream</td>
-          <td class="tool-desc">File editing operations. One-shot with files=[...] or session mode. DSL and JSON ops.</td>
+          <td class="val">ss</td>
+          <td class="tool-desc">Self-contained file edits. Quick mode (path + old_str + new_str) or batch mode (ops array). Auto opens, edits, flushes, closes.</td>
         </tr>
         <tr>
-          <td class="val">slipstream_session</td>
-          <td class="tool-desc">Session lifecycle. open, flush, close, register, unregister.</td>
+          <td class="val">ss_session</td>
+          <td class="tool-desc">Session lifecycle and queries. open, flush, close, read, status, list, check. For multi-turn workflows where you need to read before editing.</td>
         </tr>
         <tr>
-          <td class="val">slipstream_query</td>
-          <td class="tool-desc">Read-only queries. read, status, list, check.</td>
-        </tr>
-        <tr>
-          <td class="val">slipstream_help</td>
-          <td class="tool-desc">Reference card with ops format, session actions, query syntax, and common workflows.</td>
+          <td class="val">ss_help</td>
+          <td class="tool-desc">Reference card with ops format, session actions, and common workflows.</td>
         </tr>
       </tbody>
     </table>
@@ -573,14 +631,14 @@
     <h2 class="section-title">What <strong>one daemon</strong> gives your agent</h2>
     <div class="feature-grid">
       <div class="feature-card">
-        <div class="feature-label">One-Shot</div>
-        <h3>Self-contained edits</h3>
-        <p>files=[...] &#8594; ops &#8594; flush &#8594; done. No session management needed. Open, edit, write, close in a single tool call.</p>
+        <div class="feature-label">Quick Mode</div>
+        <h3>One edit, one call</h3>
+        <p>ss(path, old_str, new_str) &#8212; auto opens, replaces, flushes, closes. Same ergonomics as native Edit, but through slipstream.</p>
       </div>
       <div class="feature-card">
-        <div class="feature-label">Batch Ops</div>
-        <h3>Multiple edits, one call</h3>
-        <p>Multiple str_replace, read, write, cursor ops in a single tool call. DSL strings or JSON objects &#8212; mix freely.</p>
+        <div class="feature-label">Batch Mode</div>
+        <h3>51 edits, still one call</h3>
+        <p>ss(ops=[...]) handles any mix of str_replace, write, and read ops across unlimited files. Self-contained &#8212; no session setup needed.</p>
       </div>
       <div class="feature-card">
         <div class="feature-label">Sessions</div>
@@ -595,12 +653,12 @@
       <div class="feature-card">
         <div class="feature-label">Atomic Flush</div>
         <h3>All or nothing</h3>
-        <p>All edits apply or none do. Writes hit disk only when you say flush=true. Your buffer is your safety net.</p>
+        <p>Edits accumulate in memory, hit disk only on flush. Streaming writes with content hashing &#8212; no full-file allocation.</p>
       </div>
       <div class="feature-card">
         <div class="feature-label">DSL + JSON</div>
         <h3>Two syntaxes, one array</h3>
-        <p>DSL for quick edits (str_replace f.rs old:"foo" new:"bar"), JSON for multi-line content. Both in the same ops array.</p>
+        <p>DSL for quick edits ("str_replace f.rs old:\"foo\" new:\"bar\""), JSON for multi-line content. Both in the same ops array.</p>
       </div>
     </div>
   </section>
@@ -609,105 +667,45 @@
   <section class="section">
     <div class="section-num">03 THE RECEIPTS</div>
     <h2 class="section-title">Measured, <strong>not promised</strong></h2>
-    <p class="section-desc">Traditional file editing vs. slipstream on the same codebase. Same agent. Same task.</p>
+    <p class="section-desc">One agent, one task, four tool strategies. 20 Python files &#215; 3 cross-cutting edits = 60 assertions. Every strategy scored 60/60 on correctness &#8212; the difference is cost.</p>
     <table class="spec-table">
       <thead>
-        <tr><th>Scenario</th><th>Reduction</th><th>How</th></tr>
+        <tr><th>Strategy</th><th>Tool Calls</th><th>Tokens</th><th>Wall Time</th><th>Correct</th></tr>
       </thead>
       <tbody>
         <tr>
-          <td class="scenario">Multi-file refactor</td>
-          <td class="val">18&#8594;1 tool calls</td>
-          <td class="how">One-shot: open, edit, flush, close in a single call</td>
+          <td class="scenario">SS MCP (batch)</td>
+          <td class="val">5</td>
+          <td>26.7K</td>
+          <td class="g-val">58s</td>
+          <td><span class="tok">60/60</span></td>
         </tr>
         <tr>
-          <td class="scenario">Session editing</td>
-          <td class="val">0 re-reads</td>
-          <td class="how">In-memory buffer &#8212; no file re-reads between edits</td>
+          <td class="scenario">SS + mish</td>
+          <td class="val">5</td>
+          <td class="g-val">24.7K</td>
+          <td>61s</td>
+          <td><span class="tok">60/60</span></td>
         </tr>
         <tr>
-          <td class="scenario">Conflict resolution</td>
-          <td class="val">0 lost changes</td>
-          <td class="how">External modification detected before flush</td>
+          <td class="scenario">SS CLI (exec)</td>
+          <td class="g-val">3</td>
+          <td class="g-val">23.0K</td>
+          <td>82s</td>
+          <td><span class="tok">60/60</span></td>
+        </tr>
+        <tr>
+          <td class="scenario" style="color:var(--secondary)">Traditional<br><span style="font-size:11px;font-weight:300;color:var(--muted)">Read/Edit/Write</span></td>
+          <td style="color:var(--secondary)">15+</td>
+          <td style="color:var(--secondary)">29K+</td>
+          <td style="color:var(--secondary)">40s+</td>
+          <td><span class="tok">60/60</span></td>
         </tr>
       </tbody>
     </table>
-
-    <div class="mockup-stack">
-
-      <!-- 1: One-shot mode -->
-      <div class="term">
-        <div class="term-bar">
-          <div class="td"></div><div class="td"></div><div class="td"></div>
-          <div class="term-title">slipstream &#8212; one-shot edit</div>
-        </div>
-        <div class="term-body">{
-  <span class="tf">"files"</span>: [<span class="ta">"src/main.rs"</span>, <span class="ta">"src/lib.rs"</span>],
-  <span class="tf">"ops"</span>: [
-    <span class="ta">"str_replace src/main.rs old:\"foo\" new:\"bar\""</span>,
-    {<span class="tf">"method"</span>: <span class="ta">"file.str_replace"</span>, <span class="tf">"path"</span>: <span class="ta">"src/lib.rs"</span>,
-     <span class="tf">"old_str"</span>: <span class="ta">"deprecated()"</span>, <span class="tf">"new_str"</span>: <span class="ta">"replacement()"</span>}
-  ],
-  <span class="tf">"flush"</span>: <span class="tok">true</span>
-}
-
-<span class="tok">&#10003;</span> <span class="to">2 files opened &#8594; 2 edits applied &#8594; flushed to disk</span></div>
-      </div>
-      <p class="mockup-note">Two files, two edits, one tool call. DSL and JSON mixed in the same ops array.</p>
-
-      <!-- 2: Session mode -->
-      <div class="term">
-        <div class="term-bar">
-          <div class="td"></div><div class="td"></div><div class="td"></div>
-          <div class="term-title">slipstream_session &#8212; open + edit + flush</div>
-        </div>
-        <div class="term-body"><span class="tm"># Open a session</span>
-<span class="tp">&#8594;</span> <span class="tc">slipstream_session(<span class="ta">"open src/main.rs src/lib.rs"</span>)</span>
-  <span class="tok">&#10003;</span> <span class="to">Session "default" opened with 2 files</span>
-
-<span class="tm"># Apply edits</span>
-<span class="tp">&#8594;</span> <span class="tc">slipstream(ops=[<span class="ta">"str_replace src/main.rs old:\"v1\" new:\"v2\""</span>])</span>
-  <span class="tok">&#10003;</span> <span class="to">1 edit applied (unflushed)</span>
-
-<span class="tm"># Flush to disk</span>
-<span class="tp">&#8594;</span> <span class="tc">slipstream_session(<span class="ta">"flush"</span>)</span>
-  <span class="tok">&#10003;</span> <span class="to">1 file written</span></div>
-      </div>
-      <p class="mockup-note">Session persists between calls. Edit as many times as you need, flush when ready.</p>
-
-      <!-- 3: Conflict detection -->
-      <div class="term">
-        <div class="term-bar">
-          <div class="td"></div><div class="td"></div><div class="td"></div>
-          <div class="term-title">slipstream &#8212; conflict detected</div>
-        </div>
-        <div class="term-body"><span class="tp">&#8594;</span> <span class="tc">slipstream(flush=<span class="tok">true</span>)</span>
-  <span class="tw">&#9888;</span> <span class="tw">Conflict: src/main.rs modified externally</span>
-    <span class="to">disk:   2024-01-15T10:32:01Z (newer)</span>
-    <span class="to">buffer: 2024-01-15T10:30:45Z</span>
-
-  <span class="to">Use force=true to overwrite, or re-open to pick up changes</span></div>
-      </div>
-      <p class="mockup-note">External edits caught before your work overwrites them. No silent data loss.</p>
-
-      <!-- 4: Pre-build check -->
-      <div class="term">
-        <div class="term-bar">
-          <div class="td"></div><div class="td"></div><div class="td"></div>
-          <div class="term-title">slipstream_query &#8212; check build</div>
-        </div>
-        <div class="term-body"><span class="tp">&#8594;</span> <span class="tc">slipstream_query(<span class="ta">"check build"</span>)</span>
-  <span class="to">Running: cargo build --message-format=json</span>
-  <span class="tok">&#10003;</span> <span class="tok">Build passed</span> <span class="to">(0 errors, 2 warnings)</span>
-
-  <span class="to">Unflushed edits in session "default":</span>
-    <span class="tc">src/main.rs</span>  <span class="tw">2 pending ops</span>
-    <span class="tc">src/lib.rs</span>   <span class="tw">1 pending op</span></div>
-      </div>
-      <p class="mockup-note">Check your build without flushing. See what's pending before you commit.</p>
-
-    </div>
+    <p class="mockup-note" style="color:var(--muted);font-size:13px;margin-top:16px;">51 file operations (20 header inserts + 20 logging adds + 11 renames) across 20 files. Traditional uses native Read/Edit/Write tools &#8212; the baseline every MCP client ships with.</p>
   </section>
+
 
 </main>
 
@@ -728,6 +726,275 @@
 </footer>
 
 <script>
+// Animated terminal demo — real captured output, MCP + CLI
+(function() {
+  // Each scene has mcp + cli variants with real output
+  var SCENES = [
+    {
+      title: 'quick edit',
+      mcp: [
+        { t: 'c', s: '# one edit, one call — auto opens, edits, flushes, closes' },
+        { t: '>', s: 'ss(path="config_loader.py", old_str="import json",' },
+        { t: ' ', s: '   new_str="import json\\nimport logging\\nlogger = logging.getLogger(__name__)")' },
+        { t: '' },
+        { t: 'r', s: 'open    config_loader.py  58 lines, v1' },
+        { t: 'h', s: 'batch   1 edit queued     match_line: 3, match_count: 1' },
+        { t: 'h', s: 'flush   1 file written    config_loader.py (1 edit applied)' },
+        { t: 'r', s: 'close   status: closed' },
+        { t: '' },
+        { t: 'r', s: 'digest  1 file tracked, 0 dirty, 0 external changes' },
+        { t: 'r', s: 'session 45722eab-c70d-4f9c-b8d7-43da40b16046' },
+      ],
+      cli: [
+        { t: 'c', s: '# same edit via CLI' },
+        { t: '$', s: "slipstream exec --files config_loader.py \\" },
+        { t: ' ', s: "  --ops '[{\"method\":\"file.str_replace\",\"path\":\"config_loader.py\"," },
+        { t: ' ', s: "    \"old_str\":\"import json\"," },
+        { t: ' ', s: "    \"new_str\":\"import json\\nimport logging\\nlogger = ...\"}]' \\" },
+        { t: ' ', s: "  --flush" },
+        { t: '' },
+        { t: 'r', s: 'open    config_loader.py  58 lines, v1' },
+        { t: 'h', s: 'batch   1 edit queued     match_line: 3, match_count: 1' },
+        { t: 'h', s: 'flush   1 file written    config_loader.py (1 edit applied)' },
+        { t: 'r', s: 'close   status: closed' },
+        { t: '' },
+        { t: 'r', s: 'digest  1 file tracked, 0 dirty, 0 external changes' },
+        { t: 'r', s: 'session d7c81149-59d4-46c0-af7a-d6e2004a61f3' },
+      ]
+    },
+    {
+      title: 'batch — 5 ops, 3 files',
+      mcp: [
+        { t: 'c', s: '# copyright headers + renames across 3 files, one tool call' },
+        { t: '>', s: 'ss(ops=[' },
+        { t: ' ', s: '  {"method":"file.write","path":"auth_service.py",' },
+        { t: ' ', s: '   "start":0,"end":0,"content":["# Copyright 2026 Acme Corp"]},' },
+        { t: ' ', s: '  ...2 more file.write ops...,' },
+        { t: ' ', s: '  {"method":"file.str_replace","path":"auth_service.py",' },
+        { t: ' ', s: '   "old_str":"get_connection","new_str":"acquire_connection","replace_all":true},' },
+        { t: ' ', s: '  ...1 more str_replace op...' },
+        { t: '>', s: '])' },
+        { t: '' },
+        { t: 'r', s: 'open    3 files loaded    auth_service.py (46 lines)' },
+        { t: 'r', s: '                          order_service.py (58 lines)' },
+        { t: 'r', s: '                          user_service.py (42 lines)' },
+        { t: '' },
+        { t: 'r', s: 'batch   op 1  write       edits_pending: 1' },
+        { t: 'r', s: '        op 2  write       edits_pending: 1' },
+        { t: 'r', s: '        op 3  write       edits_pending: 1' },
+        { t: 'h', s: '        op 4  str_replace match_count: 3 (3 occurrences replaced)' },
+        { t: 'h', s: '        op 5  str_replace match_count: 5 (5 occurrences replaced)' },
+        { t: '' },
+        { t: 'h', s: 'flush   3 files written   auth_service.py  (1 edit applied)' },
+        { t: 'h', s: '                          order_service.py (1 edit applied)' },
+        { t: 'h', s: '                          user_service.py  (1 edit applied)' },
+        { t: 'r', s: 'close   status: closed' },
+        { t: '' },
+        { t: 'r', s: 'digest  3 files tracked, 0 dirty, 0 external changes' },
+      ],
+      cli: [
+        { t: 'c', s: '# same 5 ops via CLI heredoc' },
+        { t: '$', s: "slipstream exec \\" },
+        { t: ' ', s: "  --files auth_service.py user_service.py order_service.py \\" },
+        { t: ' ', s: "  --ops @- --flush <<'OPS'" },
+        { t: ' ', s: '[{"method":"file.write","path":"auth_service.py",' },
+        { t: ' ', s: '  "start":0,"end":0,"content":["# Copyright 2026 Acme Corp"]},' },
+        { t: ' ', s: ' ...4 more ops...' },
+        { t: '$', s: "OPS" },
+        { t: '' },
+        { t: 'r', s: 'open    3 files loaded    auth/order/user_service.py' },
+        { t: '' },
+        { t: 'r', s: 'batch   op 1-3  write       edits_pending: 1 each' },
+        { t: 'h', s: '        op 4    str_replace  match_count: 3' },
+        { t: 'h', s: '        op 5    str_replace  match_count: 5' },
+        { t: '' },
+        { t: 'h', s: 'flush   3 files written   warnings: []' },
+        { t: 'r', s: 'close   status: closed' },
+        { t: '' },
+        { t: 'r', s: 'digest  3 files tracked, 0 dirty, 0 external' },
+        { t: 'r', s: 'session 789f8717-f95b-4535-98e4-00d753454da5' },
+      ]
+    },
+    {
+      title: 'read file',
+      mcp: [
+        { t: 'c', s: '# read auto-opens — no session setup needed' },
+        { t: '>', s: 'ss_session("read auth_service.py start:0 end:8")' },
+        { t: '' },
+        { t: 'r', s: 'cursor: 8' },
+        { t: 'r', s: 'lines:' },
+        { t: 'h', s: '  0  "# Copyright 2026 Acme Corp"' },
+        { t: 'r', s: '  1  "from dataclasses import dataclass"' },
+        { t: 'r', s: '  2  "from typing import Optional"' },
+        { t: 'h', s: '  3  "from db_pool import acquire_connection"' },
+        { t: 'r', s: '  4  ""' },
+        { t: 'r', s: '  5  ""' },
+        { t: 'r', s: '  6  "@dataclass"' },
+        { t: 'r', s: '  7  "class AuthToken:"' },
+      ],
+      cli: [
+        { t: 'c', s: '# read via CLI exec' },
+        { t: '$', s: "slipstream exec --files auth_service.py \\" },
+        { t: ' ', s: "  --ops '[{\"method\":\"file.read\",\"path\":\"auth_service.py\",\"start\":0,\"end\":8}]'" },
+        { t: '' },
+        { t: 'r', s: 'cursor: 8' },
+        { t: 'r', s: 'lines:' },
+        { t: 'h', s: '  0  "# Copyright 2026 Acme Corp"' },
+        { t: 'r', s: '  1  "from dataclasses import dataclass"' },
+        { t: 'r', s: '  2  "from typing import Optional"' },
+        { t: 'h', s: '  3  "from db_pool import acquire_connection"' },
+        { t: 'r', s: '  4  ""' },
+        { t: 'r', s: '  5  ""' },
+        { t: 'r', s: '  6  "@dataclass"' },
+        { t: 'r', s: '  7  "class AuthToken:"' },
+        { t: '' },
+        { t: 'r', s: 'close  status: closed' },
+      ]
+    }
+  ];
+
+  var body = document.getElementById('anim-body');
+  var progress = document.getElementById('anim-progress');
+  var tabs = document.getElementById('anim-tabs');
+  var titleEl = document.getElementById('anim-title');
+  var currentScene = 0;
+  var currentMode = 'mcp';
+  var animTimeout = null;
+  var timeouts = [];
+
+  // Build progress dots
+  SCENES.forEach(function(_, i) {
+    var dot = document.createElement('div');
+    dot.className = 'anim-dot' + (i === 0 ? ' active' : '');
+    dot.addEventListener('click', function() { jumpTo(i); });
+    progress.appendChild(dot);
+  });
+
+  // Tab clicks
+  tabs.addEventListener('click', function(e) {
+    var btn = e.target.closest('.anim-tab');
+    if (!btn) return;
+    var mode = btn.dataset.mode;
+    if (mode === currentMode) return;
+    currentMode = mode;
+    updateTabs();
+    jumpTo(currentScene);
+  });
+
+  function clearTimers() {
+    if (animTimeout) clearTimeout(animTimeout);
+    timeouts.forEach(clearTimeout);
+    timeouts = [];
+  }
+
+  function jumpTo(idx) {
+    clearTimers();
+    currentScene = idx;
+    playScene(idx);
+  }
+
+  function updateDots(idx) {
+    var dots = progress.querySelectorAll('.anim-dot');
+    dots.forEach(function(d, i) {
+      d.className = 'anim-dot' + (i === idx ? ' active' : '');
+    });
+  }
+
+  function updateTabs() {
+    tabs.querySelectorAll('.anim-tab').forEach(function(btn) {
+      btn.className = 'anim-tab' + (btn.dataset.mode === currentMode ? ' active' : '');
+    });
+  }
+
+  function esc(s) {
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  function colorLine(line) {
+    var t = line.t, s = line.s || '';
+    switch(t) {
+      case 'c':  return '<span class="tm">' + esc(s) + '</span>';
+      case '>':  return '<span class="tp">\u276f</span> <span class="tc">' + esc(s) + '</span>';
+      case '$':  return '<span class="tp">$</span> <span class="tc">' + esc(s) + '</span>';
+      case ' ':  return '  <span class="tc">' + esc(s) + '</span>';
+      case 'r':  return '<span class="to">' + esc(s) + '</span>';
+      case 'h':  return '<span class="ta">' + esc(s) + '</span>';
+      case '':   return '';
+      default:   return esc(s);
+    }
+  }
+
+  function isTyped(t) { return t === '>' || t === '$'; }
+
+  function playScene(idx) {
+    updateDots(idx);
+    var scene = SCENES[idx];
+    var lines = scene[currentMode];
+    titleEl.textContent = scene.title + ' \u2014 ' + currentMode.toUpperCase();
+    body.innerHTML = '';
+    var lineIdx = 0;
+
+    function addLine(html, cls) {
+      var el = document.createElement('span');
+      el.className = 'anim-line' + (cls ? ' ' + cls : '');
+      el.innerHTML = html;
+      body.appendChild(el);
+      // Keep scroll container pinned to bottom
+      body.parentElement.scrollTop = body.parentElement.scrollHeight;
+      return el;
+    }
+
+    function nextLine() {
+      if (lineIdx >= lines.length) {
+        animTimeout = setTimeout(function() {
+          currentScene = (currentScene + 1) % SCENES.length;
+          playScene(currentScene);
+        }, 3200);
+        return;
+      }
+
+      var line = lines[lineIdx];
+      lineIdx++;
+
+      if (isTyped(line.t)) {
+        var prompt = line.t === '>' ? '\u276f' : '$';
+        var promptCls = 'tp';
+        var el = addLine('<span class="' + promptCls + '">' + prompt + '</span> <span class="tc"></span><span class="anim-cursor"></span>');
+        var tcSpan = el.querySelector('.tc');
+        var chars = line.s;
+        var ci = 0;
+
+        function typeChar() {
+          if (ci >= chars.length) {
+            el.querySelector('.anim-cursor').remove();
+            animTimeout = setTimeout(nextLine, 250);
+            return;
+          }
+          ci++;
+          tcSpan.textContent = chars.substring(0, ci);
+          body.parentElement.scrollTop = body.parentElement.scrollHeight;
+          var d = 16;
+          if ('({["'.indexOf(chars[ci]) >= 0) d = 30;
+          if (chars[ci-1] === ',') d = 40;
+          timeouts.push(setTimeout(typeChar, d));
+        }
+        timeouts.push(setTimeout(typeChar, 80));
+      } else {
+        var el = addLine(colorLine(line), 'response');
+        requestAnimationFrame(function() {
+          requestAnimationFrame(function() { el.classList.add('visible'); });
+        });
+        var d = line.t === '' ? 60 : (line.t === 'c' ? 350 : 70);
+        animTimeout = setTimeout(nextLine, d);
+      }
+    }
+
+    animTimeout = setTimeout(nextLine, 300);
+  }
+
+  playScene(0);
+})();
+
 function copyInstall(el) {
   var text = el.textContent.replace(/\$ /g, '').trim();
   navigator.clipboard.writeText(text);
