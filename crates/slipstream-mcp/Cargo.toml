@@ -11,7 +11,7 @@ name = "slipstream-mcp"
 path = "src/main.rs"
 
 [dependencies]
-slipstream-cli = { path = "../slipstream-cli" }
+slipstream-core = { path = "../slipstream-core" }
 rmcp = { version = "0.14", features = ["server", "macros", "transport-io"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

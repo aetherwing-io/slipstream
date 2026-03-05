@@ -25,7 +25,8 @@ fn start_server(mgr: Arc<SessionManager>) -> PathBuf {
     let listener = UnixListener::bind(&socket_path).unwrap();
     let registry = Arc::new(FormatRegistry::default_registry());
     let coordinator = Arc::new(Coordinator::new());
-    tokio::spawn(slipstream_daemon::serve(listener, mgr, registry, coordinator));
+    let fcp_bridge = Arc::new(slipstream_daemon::fcp_bridge::FcpBridge::new());
+    tokio::spawn(slipstream_daemon::serve(listener, mgr, registry, coordinator, fcp_bridge));
 
     socket_path
 }
@@ -33,7 +34,7 @@ fn start_server(mgr: Arc<SessionManager>) -> PathBuf {
 /// Connect and build a SlipstreamServer + a separate Client for assertions.
 async fn setup() -> (
     SlipstreamServer,
-    slipstream_cli::client::Client,
+    slipstream_core::client::Client,
     PathBuf,
     tempfile::TempDir,
 ) {
@@ -43,10 +44,10 @@ async fn setup() -> (
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
     // One client for the MCP server, one for test assertions
-    let client_for_server = slipstream_cli::client::Client::connect(&sock, false)
+    let client_for_server = slipstream_core::client::Client::connect(&sock, false)
         .await
         .expect("should connect");
-    let client_for_test = slipstream_cli::client::Client::connect(&sock, false)
+    let client_for_test = slipstream_core::client::Client::connect(&sock, false)
         .await
         .expect("should connect");
 
@@ -215,7 +216,7 @@ async fn error_bad_session() {
         .unwrap_err();
 
     match err {
-        slipstream_cli::client::ClientError::Rpc { code, .. } => {
+        slipstream_core::client::ClientError::Rpc { code, .. } => {
             assert_eq!(code, 404);
         }
         other => panic!("expected Rpc error, got: {other}"),

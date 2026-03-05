@@ -152,6 +152,15 @@ enum Command {
         #[arg(long)]
         no_batch: bool,
     },
+
+    /// Start the daemon (listens on Unix socket)
+    Daemon {
+        /// Socket path (overrides default)
+        socket: Option<PathBuf>,
+    },
+
+    /// Start the MCP stdio server
+    Mcp,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -191,9 +200,26 @@ async fn run(
     socket_path: &std::path::Path,
     auto_start: bool,
 ) -> Result<(), ClientError> {
+    // Subcommands that don't need a client connection
+    match command {
+        Command::Daemon { socket } => {
+            slipstream_daemon::run_daemon(socket).await;
+            return Ok(());
+        }
+        Command::Mcp => {
+            slipstream_mcp::run_mcp().await
+                .map_err(|e| ClientError::AutoStart(e.to_string()))?;
+            return Ok(());
+        }
+        _ => {}
+    }
+
     let mut client = Client::connect(socket_path, auto_start).await?;
 
     let result = match command {
+        // Daemon and Mcp handled above — unreachable here
+        Command::Daemon { .. } | Command::Mcp => unreachable!(),
+
         Command::Open { files } => {
             let paths: Vec<&str> = files.iter()
                 .filter_map(|p| p.to_str())

@@ -42,9 +42,9 @@ Slipstream provides a persistent background daemon that preloads files into memo
 | Crate | Binary | Purpose |
 |-------|--------|---------|
 | `slipstream-core` | — | Buffers, edits, sessions, flush engine |
-| `slipstream-daemon` | — | JSON-RPC server over Unix socket |
-| `slipstream-cli` | `slipstream` | CLI client for shell/subagent usage |
-| `slipstream-mcp` | `slipstream-mcp` | MCP server adapter for Claude Code |
+| `slipstream-daemon` | `slipstream daemon` | JSON-RPC server over Unix socket |
+| `slipstream-cli` | `slipstream` | Unified binary: CLI, daemon, and MCP |
+| `slipstream-mcp` | `slipstream mcp` | MCP server adapter for Claude Code |
 
 ### Key Design Decisions
 
@@ -145,7 +145,7 @@ Run the benchmark yourself: `python3 docs/benchmark.py`
 For Claude Code:
 
 ```bash
-claude mcp add slipstream -- ./target/release/slipstream-mcp
+claude mcp add slipstream -- ./target/release/slipstream mcp
 ```
 
 For other MCP clients:
@@ -154,7 +154,8 @@ For other MCP clients:
 {
   "mcpServers": {
     "slipstream": {
-      "command": "/path/to/slipstream-mcp"
+      "command": "/path/to/slipstream",
+      "args": ["mcp"]
     }
   }
 }
@@ -166,7 +167,7 @@ Then use the tools: `slipstream_session("open src/main.rs src/lib.rs")` → `sli
 
 ```bash
 cargo build --release
-cargo test  # 118 tests across all crates
+cargo test  # 275 tests across all crates
 ```
 
 ## License

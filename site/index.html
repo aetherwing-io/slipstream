@@ -644,10 +644,10 @@
         <div class="term-title">connect as MCP server</div>
       </div>
       <div class="term-body"><span class="tm"># Claude Code</span>
-<span class="tp">$</span> <span class="tc">claude mcp add ss -- slipstream-mcp</span>
+<span class="tp">$</span> <span class="tc">claude mcp add ss -- slipstream mcp</span>
 
-<span class="tm"># or any MCP client &#8212; add to your config:</span>
-<span class="tf">"ss"</span>: { <span class="tf">"command"</span>: <span class="ta">"slipstream-mcp"</span> }</div>
+<span class="tm"># Cursor / Windsurf / any MCP client &#8212; add to config:</span>
+<span class="tf">"ss"</span>: { <span class="tf">"command"</span>: <span class="ta">"slipstream"</span>, <span class="tf">"args"</span>: [<span class="ta">"mcp"</span>] }</div>
     </div>
 
     <p class="install-note">Restart your client. <strong>Three tools appear:</strong></p>
@@ -1015,7 +1015,7 @@
     if (ov) {
       overlayEl.innerHTML =
         '<div class="anim-overlay-intent">' + ov.intent + '</div>' +
-        '<div class="anim-overlay-meta">' + ov.meta + '</div>';
+        '<div class="anim-overlay-meta">' + (ov.meta || ov.result || '') + '</div>';
       overlayEl.classList.remove('hidden');
     }
 

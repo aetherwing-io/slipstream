@@ -856,6 +856,7 @@ dependencies = [
  "serde_json",
  "slipstream-core",
  "slipstream-daemon",
+ "slipstream-mcp",
  "tempfile",
  "thiserror",
  "tokio",
@@ -869,8 +870,10 @@ dependencies = [
  "dashmap",
  "parking_lot",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -900,7 +903,6 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
- "slipstream-cli",
  "slipstream-core",
  "slipstream-daemon",
  "tempfile",

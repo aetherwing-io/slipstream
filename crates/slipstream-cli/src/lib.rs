@@ -1,3 +1,3 @@
-pub mod client;
-pub mod format;
-pub mod parse;
+pub use slipstream_core::client;
+pub use slipstream_core::format;
+pub use slipstream_core::parse;

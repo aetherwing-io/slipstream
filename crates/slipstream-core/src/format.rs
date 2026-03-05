@@ -8,6 +8,26 @@
 use serde_json::Value;
 use std::fmt::Write;
 
+/// Check if a daemon response is an FCP pass-through (verbatim from FCP handler).
+pub fn is_fcp_passthrough(value: &Value) -> bool {
+    value.get("fcp_passthrough").is_some()
+}
+
+/// Extract the FCP pass-through text from a response, returning it verbatim.
+/// Returns the `text` field if present, otherwise the JSON as-is.
+pub fn format_fcp_passthrough(value: &Value) -> String {
+    if let Some(text) = value.get("text").and_then(|t| t.as_str()) {
+        text.to_string()
+    } else {
+        // Return the whole result minus the fcp_passthrough marker
+        let mut v = value.clone();
+        if let Some(obj) = v.as_object_mut() {
+            obj.remove("fcp_passthrough");
+        }
+        serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string())
+    }
+}
+
 /// Accumulated state for building the status bar.
 #[derive(Default)]
 pub struct StatusBar {
@@ -63,6 +83,13 @@ impl std::fmt::Display for StatusBar {
 /// Format a one-shot response (open → batch? → read? → close).
 /// `ops` is the original ops array sent to the daemon (for path/method context).
 pub fn format_one_shot(output: &Value, ops: Option<&Value>, read_all: bool) -> String {
+    // If the open result is an FCP pass-through, return it verbatim
+    if let Some(open) = output.get("open") {
+        if is_fcp_passthrough(open) {
+            return format_fcp_passthrough(open);
+        }
+    }
+
     let mut lines = Vec::new();
     let mut bar = StatusBar::default();
 
@@ -506,5 +533,40 @@ mod tests {
         }]);
         let out = format_rpc_error(-32001, "conflicting edits", Some(&data));
         assert!(out.contains("! main.rs flush: conflict lines [100-105] by session \"agent-2\""), "got: {out}");
+    }
+
+    #[test]
+    fn test_fcp_passthrough_detection() {
+        let normal = json!({"session_id": "abc", "files": {}});
+        assert!(!is_fcp_passthrough(&normal));
+
+        let fcp = json!({"text": "Sheet loaded", "fcp_passthrough": "sheets"});
+        assert!(is_fcp_passthrough(&fcp));
+    }
+
+    #[test]
+    fn test_fcp_passthrough_format_text() {
+        let fcp = json!({"text": "A1: Revenue\nB1: 100", "fcp_passthrough": "sheets"});
+        assert_eq!(format_fcp_passthrough(&fcp), "A1: Revenue\nB1: 100");
+    }
+
+    #[test]
+    fn test_fcp_passthrough_format_no_text() {
+        let fcp = json!({"success": true, "fcp_passthrough": "midi"});
+        let out = format_fcp_passthrough(&fcp);
+        assert!(out.contains("\"success\": true"), "got: {out}");
+        assert!(!out.contains("fcp_passthrough"), "should strip marker, got: {out}");
+    }
+
+    #[test]
+    fn test_one_shot_fcp_passthrough() {
+        let output = json!({
+            "open": {
+                "text": "Piano loaded",
+                "fcp_passthrough": "midi"
+            }
+        });
+        let out = format_one_shot(&output, None, false);
+        assert_eq!(out, "Piano loaded");
     }
 }

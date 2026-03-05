@@ -69,7 +69,8 @@ fn start_server(mgr: Arc<SessionManager>) -> PathBuf {
     let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
     let registry = Arc::new(FormatRegistry::default_registry());
     let coordinator = Arc::new(Coordinator::new());
-    tokio::spawn(slipstream_daemon::serve(listener, mgr, registry, coordinator));
+    let fcp_bridge = Arc::new(slipstream_daemon::fcp_bridge::FcpBridge::new());
+    tokio::spawn(slipstream_daemon::serve(listener, mgr, registry, coordinator, fcp_bridge));
 
     socket_path
 }
@@ -233,7 +234,8 @@ fn start_server_with_coord(
     let registry = Arc::new(FormatRegistry::default_registry());
     let coordinator = Arc::new(Coordinator::new());
     let coord_ref = Arc::clone(&coordinator);
-    tokio::spawn(slipstream_daemon::serve(listener, mgr, registry, coordinator));
+    let fcp_bridge = Arc::new(slipstream_daemon::fcp_bridge::FcpBridge::new());
+    tokio::spawn(slipstream_daemon::serve(listener, mgr, registry, coordinator, fcp_bridge));
 
     (socket_path, coord_ref)
 }
@@ -599,6 +601,135 @@ async fn e2e_full_coordinator_workflow() {
     let warnings = check_resp["result"]["warnings"].as_array().unwrap();
     assert!(warnings.is_empty());
     assert_eq!(check_resp["result"]["suggestion"], "Ready to build");
+
+    let _ = std::fs::remove_file(&sock);
+}
+
+#[tokio::test]
+async fn e2e_fcp_handler_register_and_route() {
+    let mgr = Arc::new(SessionManager::new());
+    let sock = start_server(Arc::clone(&mgr));
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+    // 1. Connect a mock FCP handler and register it
+    let handler_stream = UnixStream::connect(&sock).await.unwrap();
+    let (handler_read, mut handler_write) = handler_stream.into_split();
+    let mut handler_lines = BufReader::new(handler_read).lines();
+
+    // Send fcp.register
+    let register_msg = serde_json::json!({
+        "id": 1,
+        "method": "fcp.register",
+        "params": {
+            "handler_name": "sheets",
+            "extensions": ["xlsx", "xls"],
+            "capabilities": {"ops": true, "query": true, "session": true}
+        }
+    });
+    let mut bytes = serde_json::to_vec(&register_msg).unwrap();
+    bytes.push(b'\n');
+    handler_write.write_all(&bytes).await.unwrap();
+
+    // Read registration response
+    let reg_line = handler_lines.next_line().await.unwrap().unwrap();
+    let reg_resp: serde_json::Value = serde_json::from_str(&reg_line).unwrap();
+    assert_eq!(reg_resp["result"]["status"], "registered");
+    assert_eq!(reg_resp["result"]["handler_name"], "sheets");
+
+    // 2. Spawn handler loop that responds to fcp.session
+    let handler_task = tokio::spawn(async move {
+        // Wait for a request from the daemon
+        if let Some(line) = handler_lines.next_line().await.unwrap() {
+            let req: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(req["method"], "fcp.session");
+
+            // Send response back
+            let resp = serde_json::json!({
+                "id": req["id"],
+                "result": {
+                    "text": "Sheet loaded: report.xlsx",
+                    "success": true
+                }
+            });
+            let mut resp_bytes = serde_json::to_vec(&resp).unwrap();
+            resp_bytes.push(b'\n');
+            handler_write.write_all(&resp_bytes).await.unwrap();
+        }
+    });
+
+    // 3. A normal client opens a .xlsx file — should be routed to FCP handler
+    let mut client = TestClient::connect(&sock).await;
+    let resp = client
+        .request(
+            "session.open",
+            serde_json::json!({"files": ["/tmp/report.xlsx"]}),
+        )
+        .await;
+
+    // The response should be the FCP handler's response, passed through verbatim
+    let result = &resp["result"];
+    assert_eq!(result["text"], "Sheet loaded: report.xlsx");
+    assert_eq!(result["fcp_passthrough"], "sheets");
+
+    handler_task.await.unwrap();
+    let _ = std::fs::remove_file(&sock);
+}
+
+#[tokio::test]
+async fn e2e_fcp_handler_disconnect_fallback() {
+    let mgr = Arc::new(SessionManager::new());
+    let sock = start_server(Arc::clone(&mgr));
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+    // 1. Connect a mock FCP handler
+    let handler_stream = UnixStream::connect(&sock).await.unwrap();
+    let (handler_read, mut handler_write) = handler_stream.into_split();
+    let mut handler_lines = BufReader::new(handler_read).lines();
+
+    let register_msg = serde_json::json!({
+        "id": 1,
+        "method": "fcp.register",
+        "params": {
+            "handler_name": "midi",
+            "extensions": ["mid"],
+            "capabilities": {"ops": true, "query": true, "session": true}
+        }
+    });
+    let mut bytes = serde_json::to_vec(&register_msg).unwrap();
+    bytes.push(b'\n');
+    handler_write.write_all(&bytes).await.unwrap();
+
+    let _reg_line = handler_lines.next_line().await.unwrap().unwrap();
+
+    // 2. Drop the handler connection — simulates crash
+    drop(handler_write);
+    drop(handler_lines);
+
+    // Give daemon time to detect the disconnect
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // 3. Open a .mid file — should fall back to normal external handler guidance
+    let mut client = TestClient::connect(&sock).await;
+    let resp = client
+        .request(
+            "session.open",
+            serde_json::json!({"files": ["/tmp/song.mid"]}),
+        )
+        .await;
+
+    // Should get normal redirect guidance, not an FCP passthrough
+    let result = &resp["result"];
+    if result.is_array() {
+        // External handler guidance
+        assert_eq!(result[0]["status"], "external_handler");
+        assert_eq!(result[0]["handler"], "midi");
+    } else {
+        // May have gotten an error from the disconnected handler
+        assert!(
+            resp.get("error").is_some() || result.get("fcp_passthrough").is_none(),
+            "should not get a successful FCP passthrough after disconnect"
+        );
+    }
 
     let _ = std::fs::remove_file(&sock);
 }

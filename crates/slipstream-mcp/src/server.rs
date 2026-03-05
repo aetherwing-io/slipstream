@@ -11,11 +11,11 @@ use rmcp::{
 };
 use tokio::sync::Mutex;
 
-use slipstream_cli::client::{Client, ClientError};
+use slipstream_core::client::{Client, ClientError};
+use slipstream_core::format;
+use slipstream_core::parse::{self, SessionAction};
 
-use slipstream_cli::format;
 use crate::params::*;
-use slipstream_cli::parse::{self, SessionAction};
 
 /// Inner state: connection config + optional connected client.
 /// No session mapping — daemon is the sole source of truth for sessions.
@@ -298,8 +298,13 @@ impl SlipstreamServer {
 
                 match result {
                     Ok(v) => {
-                        let text = format::format_open(&v, &session_name);
-                        Ok(CallToolResult::success(vec![Content::text(text)]))
+                        if format::is_fcp_passthrough(&v) {
+                            let text = format::format_fcp_passthrough(&v);
+                            Ok(CallToolResult::success(vec![Content::text(text)]))
+                        } else {
+                            let text = format::format_open(&v, &session_name);
+                            Ok(CallToolResult::success(vec![Content::text(text)]))
+                        }
                     }
                     Err(e) => format_error(e),
                 }
@@ -514,6 +519,12 @@ impl SlipstreamServer {
             Ok(v) => v,
             Err(e) => return format_error(e),
         };
+
+        // If daemon routed to a live FCP handler, return its response verbatim
+        if format::is_fcp_passthrough(&open_result) {
+            let text = format::format_fcp_passthrough(&open_result);
+            return Ok(CallToolResult::success(vec![Content::text(text)]));
+        }
 
         let session_id = "__oneshot__";
         output.insert("open".to_string(), open_result);

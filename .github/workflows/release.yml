@@ -54,7 +54,7 @@ jobs:
       - name: Package
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../slipstream-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz slipstream slipstream-mcp
+          tar czf ../../../slipstream-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz slipstream
           cd ../../..
 
       - name: Upload artifact

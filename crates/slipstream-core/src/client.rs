@@ -5,10 +5,7 @@ use tokio::net::UnixStream;
 
 /// Compute the default socket path, matching the daemon's logic.
 pub fn default_socket_path() -> PathBuf {
-    let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
-        .or_else(|_| std::env::var("TMPDIR"))
-        .unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(runtime_dir).join("slipstream.sock")
+    crate::default_socket_path()
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -114,23 +111,19 @@ impl Client {
 
 /// Spawn the daemon process detached, pointing at the given socket path.
 fn auto_start_daemon(socket_path: &Path) -> Result<(), ClientError> {
-    // Look for the daemon binary next to our own executable first, then PATH
-    let daemon_name = "slipstream-daemon";
-    let daemon_path = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join(daemon_name)))
-        .filter(|p| p.exists())
-        .unwrap_or_else(|| PathBuf::from(daemon_name));
+    let exe = std::env::current_exe()
+        .map_err(|e| ClientError::AutoStart(format!("cannot find own executable: {e}")))?;
 
     use std::process::{Command, Stdio};
-    Command::new(&daemon_path)
+    Command::new(&exe)
+        .arg("daemon")
         .arg(socket_path.as_os_str())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .map_err(|e| ClientError::AutoStart(format!(
-            "failed to start {}: {e}", daemon_path.display()
+            "failed to start {} daemon: {e}", exe.display()
         )))?;
 
     Ok(())

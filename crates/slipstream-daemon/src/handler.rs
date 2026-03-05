@@ -7,9 +7,29 @@ use slipstream_core::manager::{ManagerError, SessionManager};
 use slipstream_core::session::SessionId;
 
 use crate::coordinator::{Coordinator, CoordinatorError};
+use crate::fcp_bridge::FcpBridge;
 use crate::protocol::{self, Request, Response, RpcError};
 use crate::registry::{FormatRegistry, HandlerEntry};
 use crate::types::*;
+
+/// Result of dispatch — either a ready response or an async FCP route request.
+pub enum DispatchResult {
+    Ready(Response),
+    /// Route to a live FCP handler. Resolved asynchronously by the connection loop.
+    FcpRoute {
+        id: Option<u64>,
+        handler_name: String,
+        action: FcpRouteAction,
+    },
+}
+
+/// What to route to the FCP handler.
+pub enum FcpRouteAction {
+    /// Route a session action string (e.g. "open /path/to/file.xlsx")
+    Session { action: String },
+    /// Route ops (DSL strings) for a file
+    Ops { path: PathBuf, ops: Vec<String> },
+}
 
 // --- Resource limits ---
 pub const MAX_SESSIONS: usize = 64;
@@ -124,9 +144,12 @@ pub fn dispatch(
     mgr: &Arc<SessionManager>,
     registry: &Arc<FormatRegistry>,
     coordinator: &Arc<Coordinator>,
-) -> Response {
-    match req.method.as_str() {
-        "session.open" => handle_session_open(req, mgr, registry, coordinator),
+    fcp_bridge: &Arc<FcpBridge>,
+) -> DispatchResult {
+    let response = match req.method.as_str() {
+        "session.open" => {
+            return handle_session_open(req, mgr, registry, coordinator, fcp_bridge);
+        }
         "session.flush" => handle_session_flush(req, mgr, coordinator),
         "session.close" => handle_session_close(req, mgr, coordinator),
         "file.read" => handle_file_read(req, mgr),
@@ -147,7 +170,8 @@ pub fn dispatch(
                 data: None,
             },
         ),
-    }
+    };
+    DispatchResult::Ready(response)
 }
 
 fn parse_params<T: serde::de::DeserializeOwned>(req: &mut Request) -> Result<T, Response> {
@@ -218,6 +242,43 @@ fn cwd() -> PathBuf {
 }
 
 fn handle_session_open(
+    req: Request,
+    mgr: &Arc<SessionManager>,
+    registry: &Arc<FormatRegistry>,
+    coordinator: &Arc<Coordinator>,
+    fcp_bridge: &Arc<FcpBridge>,
+) -> DispatchResult {
+    // Early peek: if there's exactly one file and it has a live FCP handler,
+    // route to FCP directly (transparent elevation).
+    if let Ok(peek) = serde_json::from_value::<SessionOpenParams>(req.params.clone()) {
+        if peek.files.len() == 1 {
+            let path = &peek.files[0];
+            let ext = path
+                .extension()
+                .map(|e| e.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if let Some(handler_name) = fcp_bridge.lookup_live(&ext) {
+                // Register in coordinator silently
+                let _ = coordinator.register_external(path, &handler_name);
+                let abs_path = std::fs::canonicalize(path)
+                    .unwrap_or_else(|_| path.to_path_buf());
+                let action = format!("open {}", abs_path.display());
+                return DispatchResult::FcpRoute {
+                    id: req.id,
+                    handler_name,
+                    action: FcpRouteAction::Session { action },
+                };
+            }
+        }
+    }
+
+    // Fall through to normal handling
+    DispatchResult::Ready(handle_session_open_inner(
+        req, mgr, registry, coordinator,
+    ))
+}
+
+fn handle_session_open_inner(
     mut req: Request,
     mgr: &Arc<SessionManager>,
     registry: &Arc<FormatRegistry>,
@@ -991,6 +1052,20 @@ mod tests {
         Arc::new(Coordinator::new())
     }
 
+    fn default_bridge() -> Arc<FcpBridge> {
+        Arc::new(FcpBridge::new())
+    }
+
+    /// Unwrap a DispatchResult::Ready, panicking if it's an FcpRoute.
+    fn unwrap_response(result: DispatchResult) -> Response {
+        match result {
+            DispatchResult::Ready(resp) => resp,
+            DispatchResult::FcpRoute { handler_name, .. } => {
+                panic!("expected Ready response, got FcpRoute to {handler_name}")
+            }
+        }
+    }
+
     /// Open a session with the given files and return (session_id, mgr, coordinator).
     fn open_session(
         files: &[&NamedTempFile],
@@ -998,13 +1073,14 @@ mod tests {
         let mgr = Arc::new(SessionManager::new());
         let reg = default_registry();
         let coord = default_coordinator();
+        let bridge = default_bridge();
         let paths: Vec<serde_json::Value> = files
             .iter()
             .map(|f| serde_json::Value::String(f.path().to_str().unwrap().to_string()))
             .collect();
 
         let req = make_request("session.open", serde_json::json!({ "files": paths }));
-        let resp = dispatch(req, &mgr, &reg, &coord);
+        let resp = unwrap_response(dispatch(req, &mgr, &reg, &coord, &bridge));
         let result = resp.result.expect("session.open should succeed");
         let session_id = result["session_id"].as_str().unwrap().to_string();
         (session_id, mgr, reg, coord)
@@ -1035,7 +1111,7 @@ mod tests {
                 ]
             }),
         );
-        let resp = dispatch(req, &mgr, &reg, &coord);
+        let resp = unwrap_response(dispatch(req, &mgr, &reg, &coord, &default_bridge()));
         let results = result_ok(&resp);
         let arr = results.as_array().unwrap();
         assert_eq!(arr.len(), 2);
@@ -1072,7 +1148,7 @@ mod tests {
                 ]
             }),
         );
-        let resp = dispatch(req, &mgr, &reg, &coord);
+        let resp = unwrap_response(dispatch(req, &mgr, &reg, &coord, &default_bridge()));
         let arr = result_ok(&resp).as_array().unwrap();
         assert_eq!(arr.len(), 2);
 
@@ -1101,7 +1177,7 @@ mod tests {
                 ]
             }),
         );
-        let resp = dispatch(req, &mgr, &reg, &coord);
+        let resp = unwrap_response(dispatch(req, &mgr, &reg, &coord, &default_bridge()));
         let arr = result_ok(&resp).as_array().unwrap();
 
         assert_eq!(arr[0]["edits_pending"].as_u64().unwrap(), 1);
@@ -1129,7 +1205,7 @@ mod tests {
                 ]
             }),
         );
-        let resp = dispatch(req, &mgr, &reg, &coord);
+        let resp = unwrap_response(dispatch(req, &mgr, &reg, &coord, &default_bridge()));
         let arr = result_ok(&resp).as_array().unwrap();
         assert_eq!(arr.len(), 2);
 
@@ -1159,7 +1235,7 @@ mod tests {
                 ]
             }),
         );
-        let resp = dispatch(req, &mgr, &reg, &coord);
+        let resp = unwrap_response(dispatch(req, &mgr, &reg, &coord, &default_bridge()));
         assert!(resp.error.is_some(), "batch should fail when an op errors");
     }
 
@@ -1175,7 +1251,7 @@ mod tests {
                 "ops": []
             }),
         );
-        let resp = dispatch(req, &mgr, &reg, &coord);
+        let resp = unwrap_response(dispatch(req, &mgr, &reg, &coord, &default_bridge()));
         let arr = result_ok(&resp).as_array().unwrap();
         assert!(arr.is_empty());
     }
@@ -1188,11 +1264,11 @@ mod tests {
         let coord = default_coordinator();
 
         let open_a = make_request("session.open", serde_json::json!({"files": [f1.path()]}));
-        let resp_a = dispatch(open_a, &mgr, &reg, &coord);
+        let resp_a = unwrap_response(dispatch(open_a, &mgr, &reg, &coord, &default_bridge()));
         let sid_a = result_ok(&resp_a)["session_id"].as_str().unwrap().to_string();
 
         let open_b = make_request("session.open", serde_json::json!({"files": [f1.path()]}));
-        let resp_b = dispatch(open_b, &mgr, &reg, &coord);
+        let resp_b = unwrap_response(dispatch(open_b, &mgr, &reg, &coord, &default_bridge()));
         let sid_b = result_ok(&resp_b)["session_id"].as_str().unwrap().to_string();
 
         let write_req = make_request(
@@ -1204,7 +1280,7 @@ mod tests {
                 "content": ["CHANGED"]
             }),
         );
-        dispatch(write_req, &mgr, &reg, &coord);
+        unwrap_response(dispatch(write_req, &mgr, &reg, &coord, &default_bridge()));
 
         let read_req = make_request(
             "file.read",
@@ -1214,7 +1290,7 @@ mod tests {
                 "start": 0, "end": 4
             }),
         );
-        let resp = dispatch(read_req, &mgr, &reg, &coord);
+        let resp = unwrap_response(dispatch(read_req, &mgr, &reg, &coord, &default_bridge()));
         let result = result_ok(&resp);
 
         let other = result["other_sessions"].as_array().unwrap();
@@ -1235,7 +1311,7 @@ mod tests {
         let coord = default_coordinator();
 
         let req = make_request("session.open", serde_json::json!({"files": [f.path()]}));
-        let resp = dispatch(req, &mgr, &reg, &coord);
+        let resp = unwrap_response(dispatch(req, &mgr, &reg, &coord, &default_bridge()));
         let result = result_ok(&resp);
 
         assert!(result["session_id"].as_str().is_some());
@@ -1255,7 +1331,7 @@ mod tests {
         let coord = default_coordinator();
 
         let req = make_request("session.open", serde_json::json!({"files": [f.path()]}));
-        let resp = dispatch(req, &mgr, &reg, &coord);
+        let resp = unwrap_response(dispatch(req, &mgr, &reg, &coord, &default_bridge()));
         let result = result_ok(&resp);
         // External returns an array
         let arr = result.as_array().unwrap();
@@ -1282,7 +1358,7 @@ mod tests {
         let coord = default_coordinator();
 
         let req = make_request("session.open", serde_json::json!({"files": [makefile_path]}));
-        let resp = dispatch(req, &mgr, &reg, &coord);
+        let resp = unwrap_response(dispatch(req, &mgr, &reg, &coord, &default_bridge()));
         let result = result_ok(&resp);
 
         assert_eq!(result["status"], "advisory");
@@ -1309,7 +1385,7 @@ mod tests {
             "session.open",
             serde_json::json!({"files": [py.path(), xlsx.path()]}),
         );
-        let resp = dispatch(req, &mgr, &reg, &coord);
+        let resp = unwrap_response(dispatch(req, &mgr, &reg, &coord, &default_bridge()));
         assert!(resp.result.is_none(), "mixed open should error");
         assert!(resp.error.is_some());
         let msg = resp.error.as_ref().unwrap().message.clone();
@@ -1332,7 +1408,7 @@ mod tests {
                 "content": ["REPLACED"]
             }),
         );
-        let resp = dispatch(req, &mgr, &reg, &coord);
+        let resp = unwrap_response(dispatch(req, &mgr, &reg, &coord, &default_bridge()));
         let result = result_ok(&resp);
         assert_eq!(result["session_digest"]["native_dirty"], 1);
     }
@@ -1352,14 +1428,14 @@ mod tests {
                 "content": ["changed"]
             }),
         );
-        dispatch(req, &mgr, &reg, &coord);
+        unwrap_response(dispatch(req, &mgr, &reg, &coord, &default_bridge()));
 
         // Flush
         let req = make_request(
             "session.flush",
             serde_json::json!({"session_id": sid}),
         );
-        let resp = dispatch(req, &mgr, &reg, &coord);
+        let resp = unwrap_response(dispatch(req, &mgr, &reg, &coord, &default_bridge()));
         let result = result_ok(&resp);
         assert!(result.get("session_digest").is_some());
         assert_eq!(result["session_digest"]["native_dirty"], 0);
@@ -1371,7 +1447,7 @@ mod tests {
         let (sid, mgr, reg, coord) = open_session(&[&f]);
 
         let req = make_request("session.close", serde_json::json!({"session_id": sid}));
-        let resp = dispatch(req, &mgr, &reg, &coord);
+        let resp = unwrap_response(dispatch(req, &mgr, &reg, &coord, &default_bridge()));
         let result = result_ok(&resp);
         assert!(result.get("session_digest").is_some());
 
@@ -1399,7 +1475,7 @@ mod tests {
                 "new_str": "goodbye world"
             }),
         );
-        let resp = dispatch(req, &mgr, &reg, &coord);
+        let resp = unwrap_response(dispatch(req, &mgr, &reg, &coord, &default_bridge()));
         let result = result_ok(&resp);
         assert_eq!(result["session_digest"]["native_dirty"], 1);
         assert!(result.get("session_digest").is_some());
@@ -1417,7 +1493,7 @@ mod tests {
             "coordinator.register",
             serde_json::json!({"path": "/some/file.xlsx", "handler": "sheets"}),
         );
-        let resp = dispatch(req, &mgr, &reg, &coord);
+        let resp = unwrap_response(dispatch(req, &mgr, &reg, &coord, &default_bridge()));
         let result = result_ok(&resp);
         assert!(result["tracking_id"].as_str().unwrap().starts_with("ext-"));
         assert_eq!(result["status"], "registered");
@@ -1435,7 +1511,7 @@ mod tests {
             "coordinator.register",
             serde_json::json!({"path": "/some/file.xlsx", "handler": "sheets"}),
         );
-        let resp = dispatch(req, &mgr, &reg, &coord);
+        let resp = unwrap_response(dispatch(req, &mgr, &reg, &coord, &default_bridge()));
         let tid = result_ok(&resp)["tracking_id"].as_str().unwrap().to_string();
 
         // Unregister
@@ -1443,7 +1519,7 @@ mod tests {
             "coordinator.unregister",
             serde_json::json!({"tracking_id": tid}),
         );
-        let resp = dispatch(req, &mgr, &reg, &coord);
+        let resp = unwrap_response(dispatch(req, &mgr, &reg, &coord, &default_bridge()));
         result_ok(&resp); // should succeed
         assert_eq!(coord.build_digest(&cwd(), None).total_tracked, 0);
     }
@@ -1458,7 +1534,7 @@ mod tests {
             "coordinator.unregister",
             serde_json::json!({"tracking_id": "ext-999"}),
         );
-        let resp = dispatch(req, &mgr, &reg, &coord);
+        let resp = unwrap_response(dispatch(req, &mgr, &reg, &coord, &default_bridge()));
         assert!(resp.error.is_some());
         assert_eq!(resp.error.as_ref().unwrap().code, 404);
     }
@@ -1478,13 +1554,13 @@ mod tests {
                 "content": ["modified"]
             }),
         );
-        dispatch(req, &mgr, &reg, &coord);
+        unwrap_response(dispatch(req, &mgr, &reg, &coord, &default_bridge()));
 
         let req = make_request(
             "coordinator.check",
             serde_json::json!({"action": "build"}),
         );
-        let resp = dispatch(req, &mgr, &reg, &coord);
+        let resp = unwrap_response(dispatch(req, &mgr, &reg, &coord, &default_bridge()));
         let result = result_ok(&resp);
         let warnings = result["warnings"].as_array().unwrap();
         assert!(!warnings.is_empty());
@@ -1506,16 +1582,16 @@ mod tests {
                 "content": ["changed"]
             }),
         );
-        dispatch(req, &mgr, &reg, &coord);
+        unwrap_response(dispatch(req, &mgr, &reg, &coord, &default_bridge()));
 
         let req = make_request("session.flush", serde_json::json!({"session_id": sid}));
-        dispatch(req, &mgr, &reg, &coord);
+        unwrap_response(dispatch(req, &mgr, &reg, &coord, &default_bridge()));
 
         let req = make_request(
             "coordinator.check",
             serde_json::json!({"action": "build"}),
         );
-        let resp = dispatch(req, &mgr, &reg, &coord);
+        let resp = unwrap_response(dispatch(req, &mgr, &reg, &coord, &default_bridge()));
         let result = result_ok(&resp);
         let warnings = result["warnings"].as_array().unwrap();
         assert!(warnings.is_empty());
@@ -1532,7 +1608,7 @@ mod tests {
             "coordinator.check",
             serde_json::json!({"action": "deploy"}),
         );
-        let resp = dispatch(req, &mgr, &reg, &coord);
+        let resp = unwrap_response(dispatch(req, &mgr, &reg, &coord, &default_bridge()));
         assert!(resp.error.is_some());
     }
 
@@ -1546,10 +1622,10 @@ mod tests {
             "coordinator.register",
             serde_json::json!({"path": "/tmp/test.xlsx", "handler": "sheets"}),
         );
-        dispatch(req, &mgr, &reg, &coord);
+        unwrap_response(dispatch(req, &mgr, &reg, &coord, &default_bridge()));
 
         let req = make_request("coordinator.status", serde_json::json!({}));
-        let resp = dispatch(req, &mgr, &reg, &coord);
+        let resp = unwrap_response(dispatch(req, &mgr, &reg, &coord, &default_bridge()));
         let result = result_ok(&resp);
         assert!(result["tracked_files"].as_array().is_some());
         assert!(result["native_sessions"].as_array().is_some());
@@ -1572,7 +1648,7 @@ mod tests {
                 "start": 0, "end": 1
             }),
         );
-        let resp = dispatch(req, &mgr, &reg, &coord);
+        let resp = unwrap_response(dispatch(req, &mgr, &reg, &coord, &default_bridge()));
         let result = result_ok(&resp);
         assert!(result.get("session_digest").is_none());
     }
@@ -1590,7 +1666,7 @@ mod tests {
                 "to": 1
             }),
         );
-        let resp = dispatch(req, &mgr, &reg, &coord);
+        let resp = unwrap_response(dispatch(req, &mgr, &reg, &coord, &default_bridge()));
         let result = result_ok(&resp);
         assert!(result.get("session_digest").is_none());
     }
@@ -1608,7 +1684,7 @@ mod tests {
                 "start": 0, "end": 1
             }),
         );
-        let resp = dispatch(req, &mgr, &reg, &coord);
+        let resp = unwrap_response(dispatch(req, &mgr, &reg, &coord, &default_bridge()));
         let result = result_ok(&resp);
 
         let other = result.get("other_sessions");
@@ -1648,7 +1724,7 @@ mod tests {
                 ]
             }),
         );
-        let resp = dispatch(req, &mgr, &reg, &coord);
+        let resp = unwrap_response(dispatch(req, &mgr, &reg, &coord, &default_bridge()));
         let results = result_ok(&resp);
         let arr = results.as_array().unwrap();
         assert_eq!(arr.len(), 2);
@@ -1662,7 +1738,7 @@ mod tests {
             "session.flush",
             serde_json::json!({"session_id": sid}),
         );
-        let flush_resp = dispatch(flush_req, &mgr, &reg, &coord);
+        let flush_resp = unwrap_response(dispatch(flush_req, &mgr, &reg, &coord, &default_bridge()));
         assert!(flush_resp.error.is_none(), "flush should succeed");
 
         let content = std::fs::read_to_string(f.path()).unwrap();
@@ -1695,7 +1771,7 @@ mod tests {
                 ]
             }),
         );
-        let resp = dispatch(req, &mgr, &reg, &coord);
+        let resp = unwrap_response(dispatch(req, &mgr, &reg, &coord, &default_bridge()));
         let results = result_ok(&resp);
         let arr = results.as_array().unwrap();
         assert_eq!(arr[0]["match_count"].as_u64().unwrap(), 2);
@@ -1704,7 +1780,7 @@ mod tests {
             "session.flush",
             serde_json::json!({"session_id": sid}),
         );
-        dispatch(flush_req, &mgr, &reg, &coord);
+        unwrap_response(dispatch(flush_req, &mgr, &reg, &coord, &default_bridge()));
 
         let content = std::fs::read_to_string(f.path()).unwrap();
         assert!(!content.contains("hello"));
@@ -1740,7 +1816,7 @@ mod tests {
                 ]
             }),
         );
-        let resp = dispatch(req, &mgr, &reg, &coord);
+        let resp = unwrap_response(dispatch(req, &mgr, &reg, &coord, &default_bridge()));
         let results = result_ok(&resp);
         let arr = results.as_array().unwrap();
         assert_eq!(arr[0]["match_count"].as_u64().unwrap(), 2);
@@ -1750,7 +1826,7 @@ mod tests {
             "session.flush",
             serde_json::json!({"session_id": sid}),
         );
-        dispatch(flush_req, &mgr, &reg, &coord);
+        unwrap_response(dispatch(flush_req, &mgr, &reg, &coord, &default_bridge()));
 
         let content = std::fs::read_to_string(f.path()).unwrap();
         assert_eq!(content, "AAA BBB\nccc AAA\nBBB ddd\n");
@@ -1784,7 +1860,7 @@ mod tests {
                 ]
             }),
         );
-        let resp = dispatch(req, &mgr, &reg, &coord);
+        let resp = unwrap_response(dispatch(req, &mgr, &reg, &coord, &default_bridge()));
         let results = result_ok(&resp);
         let arr = results.as_array().unwrap();
         // replace_all should find the target_word that was introduced by the write
@@ -1794,7 +1870,7 @@ mod tests {
             "session.flush",
             serde_json::json!({"session_id": sid}),
         );
-        dispatch(flush_req, &mgr, &reg, &coord);
+        unwrap_response(dispatch(flush_req, &mgr, &reg, &coord, &default_bridge()));
 
         let content = std::fs::read_to_string(f.path()).unwrap();
         assert!(content.contains("REPLACED"));
@@ -1822,7 +1898,7 @@ mod tests {
                 ]
             }),
         );
-        let resp = dispatch(req, &mgr, &reg, &coord);
+        let resp = unwrap_response(dispatch(req, &mgr, &reg, &coord, &default_bridge()));
         let results = result_ok(&resp);
         let arr = results.as_array().unwrap();
         assert_eq!(arr[0]["edits_pending"].as_u64().unwrap(), 1);
@@ -1831,9 +1907,117 @@ mod tests {
             "session.flush",
             serde_json::json!({"session_id": sid}),
         );
-        dispatch(flush_req, &mgr, &reg, &coord);
+        unwrap_response(dispatch(flush_req, &mgr, &reg, &coord, &default_bridge()));
 
         let content = std::fs::read_to_string(f.path()).unwrap();
         assert!(content.contains("replaced via lines alias"));
+    }
+
+    #[test]
+    fn fcp_route_when_handler_is_live() {
+        // When an FCP handler is registered and live, session.open on a matching
+        // extension should return DispatchResult::FcpRoute instead of Ready.
+        let mgr = Arc::new(SessionManager::new());
+        let reg = default_registry();
+        let coord = default_coordinator();
+        let bridge = Arc::new(FcpBridge::new());
+
+        // Register a live handler for .xlsx
+        let _rx = bridge.register(crate::fcp_bridge::FcpRegisterParams {
+            handler_name: "sheets".to_string(),
+            extensions: vec!["xlsx".to_string()],
+            capabilities: crate::fcp_bridge::FcpCapabilities::default(),
+        });
+
+        let req = make_request(
+            "session.open",
+            serde_json::json!({"files": ["/tmp/test.xlsx"]}),
+        );
+        let result = dispatch(req, &mgr, &reg, &coord, &bridge);
+        match result {
+            DispatchResult::FcpRoute { handler_name, .. } => {
+                assert_eq!(handler_name, "sheets");
+            }
+            DispatchResult::Ready(_) => panic!("expected FcpRoute, got Ready"),
+        }
+    }
+
+    #[test]
+    fn fcp_fallback_when_no_handler_live() {
+        // When no FCP handler is live, session.open on .xlsx should fall through
+        // to normal external handler guidance (Ready response).
+        let mgr = Arc::new(SessionManager::new());
+        let reg = default_registry();
+        let coord = default_coordinator();
+        let bridge = default_bridge(); // empty — no live handlers
+
+        let req = make_request(
+            "session.open",
+            serde_json::json!({"files": ["/tmp/test.xlsx"]}),
+        );
+        let result = dispatch(req, &mgr, &reg, &coord, &bridge);
+        match result {
+            DispatchResult::Ready(resp) => {
+                // Should return external handler guidance
+                let r = resp.result.expect("should succeed");
+                let arr = r.as_array().expect("should be array");
+                assert_eq!(arr[0]["status"].as_str().unwrap(), "external_handler");
+                assert_eq!(arr[0]["handler"].as_str().unwrap(), "sheets");
+            }
+            DispatchResult::FcpRoute { .. } => panic!("expected Ready, got FcpRoute"),
+        }
+    }
+
+    #[test]
+    fn fcp_route_only_for_single_file() {
+        // Multiple files should NOT trigger FCP routing (even if handler is live)
+        let mgr = Arc::new(SessionManager::new());
+        let reg = default_registry();
+        let coord = default_coordinator();
+        let bridge = Arc::new(FcpBridge::new());
+
+        let _rx = bridge.register(crate::fcp_bridge::FcpRegisterParams {
+            handler_name: "sheets".to_string(),
+            extensions: vec!["xlsx".to_string()],
+            capabilities: crate::fcp_bridge::FcpCapabilities::default(),
+        });
+
+        let req = make_request(
+            "session.open",
+            serde_json::json!({"files": ["/tmp/a.xlsx", "/tmp/b.xlsx"]}),
+        );
+        let result = dispatch(req, &mgr, &reg, &coord, &bridge);
+        // Multiple files: falls through to normal external handler path
+        assert!(matches!(result, DispatchResult::Ready(_)));
+    }
+
+    #[test]
+    fn text_file_not_affected_by_fcp_bridge() {
+        // A .rs file should never be routed to FCP, even if bridge has handlers
+        let f = temp_file("hello\n");
+        let mgr = Arc::new(SessionManager::new());
+        let reg = default_registry();
+        let coord = default_coordinator();
+        let bridge = Arc::new(FcpBridge::new());
+
+        let _rx = bridge.register(crate::fcp_bridge::FcpRegisterParams {
+            handler_name: "sheets".to_string(),
+            extensions: vec!["xlsx".to_string()],
+            capabilities: crate::fcp_bridge::FcpCapabilities::default(),
+        });
+
+        let req = make_request(
+            "session.open",
+            serde_json::json!({"files": [f.path()]}),
+        );
+        let result = dispatch(req, &mgr, &reg, &coord, &bridge);
+        match result {
+            DispatchResult::Ready(resp) => {
+                assert!(resp.error.is_none(), "should succeed for text file");
+                let r = resp.result.unwrap();
+                assert!(r.get("session_id").is_some(), "should have session_id");
+            }
+            DispatchResult::FcpRoute { .. } => panic!("text file should not be routed to FCP"),
+        }
     }
 }
