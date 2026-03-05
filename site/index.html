@@ -724,29 +724,29 @@
       </thead>
       <tbody>
         <tr>
-          <td class="scenario">SS MCP (batch)</td>
-          <td class="val">5</td>
-          <td class="g-val">19K</td>
-          <td class="g-val">53s</td>
-          <td><span class="tok">60/60</span></td>
-        </tr>
-        <tr>
           <td class="scenario">SS + mish</td>
-          <td class="val">5</td>
-          <td class="g-val">19K</td>
-          <td>53s</td>
+          <td class="val">6</td>
+          <td class="g-val">16.7K</td>
+          <td class="g-val">57s</td>
           <td><span class="tok">60/60</span></td>
         </tr>
         <tr>
-          <td class="scenario" style="color:var(--secondary)">Traditional<br><span style="font-size:11px;font-weight:300;color:var(--muted)">Read/Edit/Write</span></td>
-          <td style="color:var(--secondary)">73</td>
-          <td style="color:var(--secondary)">~40K</td>
-          <td style="color:var(--secondary)">—</td>
+          <td class="scenario">SS MCP (batch)</td>
+          <td class="val">7</td>
+          <td class="g-val">19.5K</td>
+          <td>90s</td>
+          <td><span class="tok">60/60</span></td>
+        </tr>
+        <tr>
+          <td class="scenario" style="color:var(--secondary)">Traditional<br><span style="font-size:11px;font-weight:300;color:var(--muted)">sed via Bash</span></td>
+          <td style="color:var(--secondary)">7</td>
+          <td style="color:var(--secondary)">14.9K</td>
+          <td style="color:var(--secondary)">56s</td>
           <td><span class="tok">60/60</span></td>
         </tr>
       </tbody>
     </table>
-    <p class="mockup-note" style="color:var(--muted);font-size:13px;margin-top:16px;">51 file operations (20 header inserts + 20 logging adds + 11 renames) across 20 files. Compact format output &#8212; ~50% fewer tokens, 93% fewer tool calls than Traditional. Same task, same correctness.</p>
+    <p class="mockup-note" style="color:var(--muted);font-size:13px;margin-top:16px;">51 file operations (20 header inserts + 20 logging adds + 11 renames) across 20 files. Run 4: Opus 4.6 subagents. The Traditional agent discovered sed batching on its own &#8212; fewer tokens, but no conflict detection, no sessions, no undo.</p>
   </section>
 
 

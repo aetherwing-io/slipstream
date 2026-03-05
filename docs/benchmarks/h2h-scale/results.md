@@ -1,5 +1,35 @@
 # H2H Scale Benchmark Results
 
+## Run 4 — 2026-03-05 (Opus 4.6 Subagents, system-measured metrics)
+
+**Model**: Claude Opus 4.6 (subagents via Agent tool, bypassPermissions)
+**Task**: 20 Python files × 3 cross-cutting edits = 60 assertions
+**Tool surface**: 3 tools (`ss`, `ss_session`, `ss_help`)
+**Metrics**: System-measured from Agent tool output (`total_tokens`, `tool_uses`, `duration_ms`)
+
+| Metric | A: Traditional | B1: SS MCP | B2: SS CLI | B3: SS + mish |
+|--------|---------------|------------|------------|---------------|
+| **Tool calls** | 7 | 7 | 4 | 6 |
+| **Tokens** | 14.9K | 19.5K | 21.8K | 16.7K |
+| **Wall time** | 56s | 90s | 68s | 57s |
+| **Correctness** | 60/60 | 60/60 | 60/60 | 60/60 |
+
+### Contender Strategies
+
+- **A (Traditional)**: Used a single `sed` loop in Bash to apply all 3 edits across all 20 files. Opus 4.6 independently discovered sed batching. Fastest wall time (56s), lowest tokens (14.9K), but no conflict detection, sessions, or undo.
+- **B1 (SS MCP)**: 3 `ss(ops=[...])` batch calls (headers + logging + rename) + setup + verify. Consistent ~19.5K tokens across runs.
+- **B2 (SS CLI)**: Single `slipstream exec --flush` with 51 ops in a heredoc. Fewest tool calls (4) but highest tokens (21.8K) — agent generated the full heredoc from scratch.
+- **B3 (SS + mish)**: Same 3-batch strategy as B1 but using `sh_run` instead of Bash. Best SS token efficiency (16.7K), competitive wall time (57s).
+
+### Key Observations
+
+1. **Traditional agent discovered sed** — Opus 4.6 independently finds sed batching every time now. Lowest tokens but zero safety features.
+2. **SS + mish is the sweet spot** — 16.7K tokens, 57s wall time, 6 tool calls. Competitive with Traditional on speed while retaining conflict detection and sessions.
+3. **SS MCP consistent but slower** — 19.5K tokens (stable across all runs), but 90s wall time suggests Bash→MCP context switching adds overhead.
+4. **SS CLI highest tokens** — The heredoc is pre-composed in the prompt but the agent still generates 21.8K tokens reproducing it. Good for automation, expensive for LLM generation.
+
+---
+
 ## Run 2 — 2026-03-04 (Post Tool Surface Redesign)
 
 **Model**: Claude Opus 4.6 (subagents via Agent tool)

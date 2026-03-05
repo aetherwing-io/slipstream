@@ -209,11 +209,17 @@ impl SlipstreamServer {
         if let Some(ref path) = p.path {
             let old_str = match p.old_str {
                 Some(ref s) => s.clone(),
-                None => return err_result("quick mode requires old_str".to_string()),
+                None => return err_result(format!(
+                    "quick mode requires old_str (received: path={:?}, old_str=None, new_str={:?})",
+                    path, p.new_str
+                )),
             };
             let new_str = match p.new_str {
                 Some(ref s) => s.clone(),
-                None => return err_result("quick mode requires new_str".to_string()),
+                None => return err_result(format!(
+                    "quick mode requires new_str (received: path={:?}, old_str={:?}, new_str=None)",
+                    path, p.old_str
+                )),
             };
             let replace_all = p.replace_all.unwrap_or(false);
 
