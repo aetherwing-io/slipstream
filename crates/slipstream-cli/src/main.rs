@@ -5,13 +5,13 @@ use clap::{Parser, Subcommand};
 use slipstream_cli::client::{self, Client, ClientError};
 
 #[derive(Parser)]
-#[command(name = "slipstream", about = "Slipstream file editing daemon")]
+#[command(name = "slipstream", about = "CLI client for the Slipstream editing daemon")]
 struct Cli {
-    /// Unix socket path
+    /// Path to the daemon's Unix socket
     #[arg(long, env = "SLIPSTREAM_SOCKET")]
     socket: Option<PathBuf>,
 
-    /// Skip daemon auto-start
+    /// Don't auto-start the daemon if it isn't running
     #[arg(long)]
     no_auto_start: bool,
 
@@ -21,8 +21,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Open session with files
+    /// Open a session with one or more files
     Open {
+        /// File paths to open
         files: Vec<PathBuf>,
     },
 
@@ -34,27 +35,25 @@ enum Command {
 
         path: PathBuf,
 
-        /// Start line (0-indexed)
-        #[arg(long)]
-        start: Option<usize>,
-
-        /// End line (exclusive)
-        #[arg(long)]
-        end: Option<usize>,
+        /// Line range, e.g. 6650:6720
+        #[arg(short, long)]
+        lines: Option<String>,
 
         /// Lines from cursor
         #[arg(short = 'n', long)]
         count: Option<usize>,
     },
 
-    /// Write lines to a file
+    /// Write lines to a file in an active session
     Write {
+        /// Session ID
         #[arg(short, long)]
         session: String,
 
+        /// File path
         path: PathBuf,
 
-        /// Start line
+        /// Start line (0-indexed, inclusive)
         #[arg(long)]
         start: usize,
 
@@ -62,88 +61,100 @@ enum Command {
         #[arg(long)]
         end: usize,
 
-        /// Content lines
+        /// Content lines (repeatable)
         #[arg(short, long)]
         content: Vec<String>,
 
-        /// Read content from stdin
+        /// Read content lines from stdin instead of -c flags
         #[arg(long)]
         stdin: bool,
     },
 
-    /// Move cursor
+    /// Move the cursor for a file in an active session
     Cursor {
+        /// Session ID
         #[arg(short, long)]
         session: String,
+
+        /// File path
         path: PathBuf,
+
+        /// Target line number
         #[arg(long)]
         to: usize,
     },
 
-    /// Flush edits to disk
+    /// Flush pending edits to disk
     Flush {
+        /// Session ID
         #[arg(short, long)]
         session: String,
-        /// Override conflicts
+
+        /// Force flush even if conflicts detected
         #[arg(long)]
         force: bool,
     },
 
-    /// Close session
+    /// Close a session and release resources
     Close {
+        /// Session ID
         #[arg(short, long)]
         session: String,
     },
 
-    /// List sessions
+    /// List active sessions with file counts
     List,
 
-    /// Batch operations in one call
+    /// Execute a batch of operations in a single round trip
     Batch {
+        /// Session ID
         #[arg(short, long)]
         session: String,
-        /// JSON array (inline or @file)
+
+        /// Operations as JSON array (inline or @file)
         #[arg(long)]
         ops: String,
     },
 
-    /// Agent quick reference
+    /// LLM/agent quick reference. If you are an AI agent, start here.
     Agent,
 
-    /// Open + edit + flush + close in one call
+    /// Open files, apply operations, optionally flush, and close — all in one call.
+    /// Combines open + batch + flush + close into a single CLI invocation.
     Exec {
-        /// Files to open
+        /// File paths to open
         #[arg(long, required = true, num_args = 1..)]
         files: Vec<PathBuf>,
 
-        /// JSON ops (inline, @file, @- stdin)
+        /// Operations as JSON array (inline, @file, or @- for stdin)
         #[arg(long)]
         ops: Option<String>,
 
-        /// Read files before ops
+        /// Read all opened files before applying ops
         #[arg(long)]
         read_all: bool,
 
-        /// Write changes to disk
+        /// Flush edits to disk after applying ops
         #[arg(long)]
         flush: bool,
 
-        /// Override conflicts
+        /// Force flush even if conflicts detected
         #[arg(long)]
         force: bool,
 
-        /// Skip batching (debug)
-        #[arg(long, hide = true)]
+        /// Send individual RPC calls per op instead of a single batch call.
+        /// Tests the standalone handler path (both paths call the same dispatch_op).
+        #[arg(long)]
         no_batch: bool,
     },
 
-    /// Start daemon
+    /// Start the daemon (listens on Unix socket)
     Daemon {
-        /// Socket path
+        /// Socket path (overrides default)
         socket: Option<PathBuf>,
     },
 
-    /// Start MCP stdio server
+    /// Start the MCP stdio server
     Mcp,
 }
 
@@ -211,7 +222,7 @@ async fn run(
             client.request("session.open", serde_json::json!({ "files": paths })).await?
         }
 
-        Command::Read { session, path, start, end, count } => {
+        Command::Read { session, path, lines, count } => {
             let (session_id, auto_opened) = match session {
                 Some(s) => (s, false),
                 None => {
@@ -233,9 +244,10 @@ async fn run(
                 "session_id": session_id,
                 "path": path,
             });
-            if let (Some(s), Some(e)) = (start, end) {
-                params["start"] = serde_json::json!(s);
-                params["end"] = serde_json::json!(e);
+            if let Some(ref range) = lines {
+                let (start, end) = parse_line_range(range)?;
+                params["start"] = serde_json::json!(start);
+                params["end"] = serde_json::json!(end);
             } else if let Some(n) = count {
                 params["count"] = serde_json::json!(n);
             }
@@ -506,4 +518,27 @@ fn parse_ops(input: &str) -> Result<serde_json::Value, ClientError> {
         message: e,
         data: None,
     })
+}
+
+/// Parse "start:end" line range, e.g. "6650:6720"
+fn parse_line_range(s: &str) -> Result<(usize, usize), ClientError> {
+    let parts: Vec<&str> = s.splitn(2, ':').collect();
+    if parts.len() != 2 {
+        return Err(ClientError::Rpc {
+            code: -1,
+            message: format!("invalid line range '{s}', expected start:end"),
+            data: None,
+        });
+    }
+    let start: usize = parts[0].parse().map_err(|_| ClientError::Rpc {
+        code: -1,
+        message: format!("invalid start line '{}'", parts[0]),
+        data: None,
+    })?;
+    let end: usize = parts[1].parse().map_err(|_| ClientError::Rpc {
+        code: -1,
+        message: format!("invalid end line '{}'", parts[1]),
+        data: None,
+    })?;
+    Ok((start, end))
 }
