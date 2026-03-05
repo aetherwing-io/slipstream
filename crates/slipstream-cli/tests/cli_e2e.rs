@@ -20,7 +20,8 @@ fn start_server(mgr: Arc<SessionManager>) -> PathBuf {
     let registry = Arc::new(FormatRegistry::default_registry());
     let coordinator = Arc::new(Coordinator::new());
     let fcp_bridge = Arc::new(slipstream_daemon::fcp_bridge::FcpBridge::new());
-    tokio::spawn(slipstream_daemon::serve(listener, mgr, registry, coordinator, fcp_bridge));
+    let plugin_mgr = Arc::new(slipstream_daemon::plugin_manager::PluginManager::new());
+    tokio::spawn(slipstream_daemon::serve(listener, mgr, registry, coordinator, fcp_bridge, plugin_mgr, socket_path.clone()));
 
     socket_path
 }

@@ -15,6 +15,11 @@ thiserror = "2"
 slipstream-core = { path = "../slipstream-core" }
 slipstream-daemon = { path = "../slipstream-daemon" }
 slipstream-mcp = { path = "../slipstream-mcp" }
+fcp-regex-core = { path = "../../../fcp/fcp-regex/fcp-regex-core", optional = true }
+
+[features]
+default = ["fcp-regex"]
+fcp-regex = ["dep:fcp-regex-core"]
 
 [dev-dependencies]
 slipstream-core = { path = "../slipstream-core" }
