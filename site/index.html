@@ -189,6 +189,23 @@
   .anim-line { display: block; min-height: 1.7em; }
   .anim-line.response { opacity: 0; transition: opacity 0.15s; }
   .anim-line.response.visible { opacity: 1; }
+  .anim-banner {
+    padding: 14px 24px;
+    font-family: var(--sans);
+    font-size: 14px;
+    font-weight: 300;
+    color: var(--text);
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    line-height: 1.5;
+    min-height: 48px;
+    display: flex;
+    align-items: center;
+  }
+  .anim-banner strong {
+    color: var(--bright);
+    font-weight: 500;
+  }
   .anim-controls {
     display: flex;
     align-items: center;
@@ -551,6 +568,7 @@
         <div class="td"></div><div class="td"></div><div class="td"></div>
         <div class="term-title" id="anim-title">slipstream in action</div>
       </div>
+      <div class="anim-banner" id="anim-banner"></div>
       <div class="term-body"><div class="anim-scroll" id="anim-body"></div></div>
       <div class="anim-controls">
         <div class="anim-tabs" id="anim-tabs">
@@ -732,6 +750,7 @@
   var SCENES = [
     {
       title: 'quick edit',
+      banner: 'Edit <strong>one string</strong> in one file. Opens, replaces, saves, and closes &mdash; all in a single call.',
       mcp: [
         { t: 'c', s: '# one edit, one call' },
         { t: '>', s: 'ss(path="config_loader.py", old_str="import json",' },
@@ -756,6 +775,7 @@
     },
     {
       title: 'batch — 5 ops, 3 files',
+      banner: 'Insert copyright headers and rename functions across <strong>3 files</strong> &mdash; still one call. Each <code style="color:var(--ice)">~</code> is an applied edit.',
       mcp: [
         { t: 'c', s: '# 5 ops across 3 files, one tool call' },
         { t: '>', s: 'ss(ops=[' },
@@ -793,6 +813,7 @@
     },
     {
       title: 'read file',
+      banner: 'Read a file range. The <code style="color:var(--ice)">@</code> header shows what you got, then raw content follows &mdash; no JSON wrapping.',
       mcp: [
         { t: 'c', s: '# read — no session setup needed' },
         { t: '>', s: 'ss_session("read auth_service.py start:0 end:8")' },
@@ -826,6 +847,7 @@
     },
     {
       title: 'error handling',
+      banner: 'When an edit fails, you see exactly which op and why. The <code style="color:var(--error)">!</code> marks the error. Status bar counts it.',
       mcp: [
         { t: 'c', s: '# errors inline — no exception walls' },
         { t: '>', s: 'ss(ops=[' },
@@ -860,6 +882,7 @@
   var progress = document.getElementById('anim-progress');
   var tabs = document.getElementById('anim-tabs');
   var titleEl = document.getElementById('anim-title');
+  var bannerEl = document.getElementById('anim-banner');
   var currentScene = 0;
   var currentMode = 'mcp';
   var animTimeout = null;
@@ -935,6 +958,7 @@
     var scene = SCENES[idx];
     var lines = scene[currentMode];
     titleEl.textContent = scene.title + ' \u2014 ' + currentMode.toUpperCase();
+    bannerEl.innerHTML = scene.banner || '';
     body.innerHTML = '';
     var lineIdx = 0;
 
@@ -953,7 +977,7 @@
         animTimeout = setTimeout(function() {
           currentScene = (currentScene + 1) % SCENES.length;
           playScene(currentScene);
-        }, 3200);
+        }, 4500);
         return;
       }
 
@@ -977,9 +1001,9 @@
           ci++;
           tcSpan.textContent = chars.substring(0, ci);
           body.parentElement.scrollTop = body.parentElement.scrollHeight;
-          var d = 16;
-          if ('({["'.indexOf(chars[ci]) >= 0) d = 30;
-          if (chars[ci-1] === ',') d = 40;
+          var d = 28;
+          if ('({["'.indexOf(chars[ci]) >= 0) d = 50;
+          if (chars[ci-1] === ',') d = 65;
           timeouts.push(setTimeout(typeChar, d));
         }
         timeouts.push(setTimeout(typeChar, 80));
@@ -988,7 +1012,7 @@
         requestAnimationFrame(function() {
           requestAnimationFrame(function() { el.classList.add('visible'); });
         });
-        var d = line.t === '' ? 60 : (line.t === 'c' ? 350 : 70);
+        var d = line.t === '' ? 200 : (line.t === 'c' ? 600 : (line.t === 'h' || line.t === 'terr' ? 400 : 250));
         animTimeout = setTimeout(nextLine, d);
       }
     }
