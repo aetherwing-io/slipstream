@@ -1,7 +1,35 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use slipstream_core::session::SessionId;
 use std::collections::HashMap;
 use std::path::PathBuf;
+
+/// Deserialize content as either a JSON array of strings or a single string
+/// (split on newlines). Accepts both `"line1\nline2"` and `["line1","line2"]`.
+fn deserialize_content_lines<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
+    use serde::de;
+
+    struct ContentVisitor;
+    impl<'de> de::Visitor<'de> for ContentVisitor {
+        type Value = Vec<String>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a string or array of strings")
+        }
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<Vec<String>, E> {
+            Ok(v.lines().map(String::from).collect())
+        }
+        fn visit_string<E: de::Error>(self, v: String) -> Result<Vec<String>, E> {
+            Ok(v.lines().map(String::from).collect())
+        }
+        fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<String>, A::Error> {
+            let mut lines = Vec::new();
+            while let Some(s) = seq.next_element::<String>()? {
+                lines.push(s);
+            }
+            Ok(lines)
+        }
+    }
+    deserializer.deserialize_any(ContentVisitor)
+}
 
 // --- session.open ---
 
@@ -106,8 +134,13 @@ pub struct OtherSessionInfo {
 pub struct FileWriteParams {
     pub session_id: SessionId,
     pub path: PathBuf,
-    pub start: usize,
-    pub end: usize,
+    /// Start line (0-indexed, inclusive). Omit to replace entire file.
+    #[serde(default)]
+    pub start: Option<usize>,
+    /// End line (exclusive). Omit to replace entire file.
+    #[serde(default)]
+    pub end: Option<usize>,
+    #[serde(deserialize_with = "deserialize_content_lines", alias = "lines")]
     pub content: Vec<String>,
 }
 
@@ -168,9 +201,11 @@ pub enum Op {
     #[serde(rename = "file.write")]
     Write {
         path: PathBuf,
-        start: usize,
-        end: usize,
-        #[serde(alias = "lines")]
+        #[serde(default)]
+        start: Option<usize>,
+        #[serde(default)]
+        end: Option<usize>,
+        #[serde(deserialize_with = "deserialize_content_lines", alias = "lines")]
         content: Vec<String>,
     },
     #[serde(rename = "file.str_replace")]

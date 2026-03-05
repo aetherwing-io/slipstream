@@ -110,6 +110,16 @@ pub fn dispatch_op(
             Ok(OpResult::Read { lines, cursor })
         }
         Op::Write { path, start, end, content } => {
+            // Resolve None start/end: replace entire file
+            let (start, end) = match (start, end) {
+                (Some(s), Some(e)) => (s, e),
+                (None, None) => {
+                    let handle = session.file(&path)?;
+                    (0, handle.line_count()?)
+                }
+                (Some(s), None) => (s, s), // start only → insert at that line
+                (None, Some(e)) => (0, e), // end only → replace from start
+            };
             let count = session.write(&path, start, end, content)?;
             let dirty = mgr.canonical_path(&path)
                 .ok()

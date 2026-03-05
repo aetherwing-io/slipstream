@@ -607,7 +607,15 @@ pub fn normalize_ops(ops: &serde_json::Value) -> Result<serde_json::Value, Strin
                         "op {i}: JSON object must have a \"method\" string field"
                     ));
                 }
-                out.push(item.clone());
+                let mut op = item.clone();
+                // Normalize file.write: accept string content → split to array
+                if op.get("method").and_then(|v| v.as_str()) == Some("file.write") {
+                    if let Some(serde_json::Value::String(s)) = op.get("content") {
+                        let lines: Vec<&str> = s.lines().collect();
+                        op["content"] = serde_json::json!(lines);
+                    }
+                }
+                out.push(op);
             }
             _ => return Err(format!("op {i}: expected string (DSL) or object (JSON)")),
         }

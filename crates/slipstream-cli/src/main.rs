@@ -440,6 +440,13 @@ const AGENT_REFERENCE: &str = r#"# Slipstream — Agent Quick Reference
 
 IF YOU ARE AN LLM/AI AGENT, USE `exec` FOR EVERYTHING.
 One command = open files + apply edits + flush + close.
+Files are auto-created if they don't exist.
+
+## Create a new file
+
+    slipstream exec --files script.py --ops '[
+      {"method":"file.write","path":"script.py","content":"x = 1\nprint(x)"}
+    ]' --flush
 
 ## Edit a file (str_replace)
 
@@ -464,6 +471,12 @@ One command = open files + apply edits + flush + close.
       {"method":"file.str_replace","path":"src/main.rs","old_str":"old","new_str":"new"}
     ]' --flush
 
+## Write entire file (omit start/end to replace all content)
+
+    slipstream exec --files f.rs --ops '[
+      {"method":"file.write","path":"f.rs","content":"new entire content\nline 2"}
+    ]' --flush
+
 ## Insert lines (start==end inserts before that line)
 
     slipstream exec --files f.rs --ops '[
@@ -480,8 +493,12 @@ One command = open files + apply edits + flush + close.
 
     Add "replace_all":true to a str_replace op.
 
+## file.write content format
+    content can be a string ("line1\nline2") or array (["line1","line2"]).
+    start/end are optional — omit both to replace the entire file.
+
 ## Key flags
-    --files     Files to open (required, space-separated)
+    --files     Files to open (required, space-separated, auto-created)
     --ops       JSON array of operations (inline, @file, or @- for stdin)
     --read-all  Print file contents before applying ops
     --flush     Write changes to disk (without this, edits are discarded)

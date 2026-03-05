@@ -99,9 +99,10 @@ Add `"replace_all": true` to replace every occurrence.
 
 ### file.write
 ```json
+{"method": "file.write", "path": "f.rs", "content": "entire file content\nline 2"}
 {"method": "file.write", "path": "f.rs", "start": 0, "end": 0, "content": ["inserted line"]}
 ```
-start==end inserts, start<end replaces.
+content: string ("a\nb") or array (["a","b"]). start/end optional — omit to replace entire file. start==end inserts, start<end replaces.
 
 ### file.read
 ```json

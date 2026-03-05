@@ -37,15 +37,29 @@ struct PoolEntry {
 impl FileBuffer {
     /// Load a file from disk into a line-indexed buffer.
     pub fn load(path: &Path, max_file_size: usize) -> Result<Self, BufferError> {
-        let metadata = std::fs::metadata(path).map_err(BufferError::Io)?;
-        let size = metadata.len() as usize;
-
-        if size > max_file_size {
-            return Err(BufferError::FileTooLarge {
-                path: path.to_path_buf(),
-                size_bytes: size,
-                limit_bytes: max_file_size,
-            });
+        // Auto-create: if file doesn't exist, start with an empty buffer.
+        // The file will be created on disk when the session is flushed.
+        match std::fs::metadata(path) {
+            Ok(metadata) => {
+                let size = metadata.len() as usize;
+                if size > max_file_size {
+                    return Err(BufferError::FileTooLarge {
+                        path: path.to_path_buf(),
+                        size_bytes: size,
+                        limit_bytes: max_file_size,
+                    });
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                return Ok(FileBuffer {
+                    path: path.to_path_buf(),
+                    lines: Vec::new(),
+                    trailing_newline: true,
+                    version: 1,
+                    disk_hash: hash_content(""),
+                });
+            }
+            Err(e) => return Err(BufferError::Io(e)),
         }
 
         let content = std::fs::read_to_string(path).map_err(|e| {
@@ -177,7 +191,17 @@ impl BufferPool {
         }
 
         // Slow path: syscall + cache
-        let canonical = std::fs::canonicalize(path).map_err(BufferError::Io)?;
+        // For non-existent files, canonicalize parent dir + filename
+        let canonical = match std::fs::canonicalize(path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let parent = path.parent().unwrap_or(Path::new("."));
+                let name = path.file_name().ok_or(BufferError::Io(e))?;
+                let canonical_parent = std::fs::canonicalize(parent).map_err(BufferError::Io)?;
+                canonical_parent.join(name)
+            }
+            Err(e) => return Err(BufferError::Io(e)),
+        };
         let mut cache = self.path_cache.write();
         // Bounded cache: clear entirely if exceeding 1024 entries to prevent unbounded growth.
         if cache.len() >= 1024 {
