@@ -17,58 +17,63 @@ pub enum OpItem {
     Json(serde_json::Value),
 }
 
-/// Parameters for the main `slipstream` tool.
+fn default_true() -> bool {
+    true
+}
+
+/// Parameters for the main `ss` tool.
 ///
-/// Two modes:
-/// - **One-shot** (`files` provided): open → read? → ops? → flush? → close.
-/// - **Session** (`files` omitted): apply ops to an active named session.
+/// Two mutually exclusive modes:
+/// - **Quick mode** (`path` provided): single str_replace edit — auto open/edit/flush/close.
+/// - **Batch mode** (`ops` provided): multiple ops — auto open/apply/flush/close.
+///
+/// If neither `path` nor `ops` is provided, returns an error.
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct SlipstreamParams {
-    /// File paths — if provided, creates a one-shot session (auto open+close).
-    /// Omit to operate on the active session from slipstream_session('open ...').
-    pub files: Option<Vec<String>>,
-    /// Named session to operate on (default: "default").
-    /// Only meaningful when files is omitted (session mode).
-    pub session: Option<String>,
-    /// Batch operations — each item is either a DSL string or a JSON object.
-    /// DSL strings: "str_replace f.rs old:\"foo\" new:\"bar\"", "read f.rs start:10 end:20"
-    /// JSON objects: {"method": "file.str_replace", "path": "f.rs", "old_str": "multi\nline", "new_str": "new"}
-    /// Both formats can be mixed in the same array. Use JSON for multi-line content to avoid double-escaping.
+pub struct SsParams {
+    // --- Quick mode params ---
+    /// Quick mode: target file path
+    pub path: Option<String>,
+    /// Quick mode: text to find (substring match)
+    pub old_str: Option<String>,
+    /// Quick mode: replacement text
+    pub new_str: Option<String>,
+    /// Quick mode: replace every occurrence (default: false, errors if >1 match)
+    pub replace_all: Option<bool>,
+
+    // --- Batch mode params ---
+    /// Batch mode: operations array — DSL strings or JSON objects (mix freely).
+    /// DSL: "str_replace f.rs old:\"foo\" new:\"bar\""
+    /// JSON: {"method": "file.str_replace", "path": "f.rs", "old_str": "multi\nline", "new_str": "new"}
     pub ops: Option<Vec<OpItem>>,
-    /// Read all files before applying ops
+
+    // --- Common params ---
+    /// Read all files before applying ops (batch mode only)
     #[serde(default)]
     pub read_all: bool,
-    /// Flush edits to disk after ops
-    #[serde(default)]
+    /// Flush edits to disk after ops (default: true — fire-and-forget)
+    #[serde(default = "default_true")]
     pub flush: bool,
-    /// Force flush even if conflicts detected
+    /// Force flush past conflicts
     #[serde(default)]
     pub force: bool,
+    /// Named session (rarely needed — most usage is one-shot)
+    pub session: Option<String>,
 }
 
-/// Parameters for `slipstream_session` — lifecycle actions.
+/// Parameters for `ss_session` — lifecycle + queries.
 ///
-/// Actions: open, flush, close, register, unregister.
-/// Examples: "open src/main.rs", "open data.csv as:worker-1", "flush", "close session:worker-1"
+/// Actions: open, flush, close, read, status, list, check, register, unregister.
+/// Examples: "open src/main.rs", "open data.csv as:worker-1",
+/// "flush", "flush --force", "close", "close --no-flush",
+/// "read src/main.rs start:10 end:20", "status", "list", "check build"
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct SessionActionParams {
-    /// Lifecycle action string.
+pub struct SsSessionParams {
+    /// Action string.
     /// Examples: "open src/main.rs src/lib.rs", "open f.rs as:worker-1",
     /// "flush", "flush --force", "flush session:worker-1",
-    /// "close", "close session:worker-1",
+    /// "close", "close --no-flush", "close session:worker-1",
+    /// "read src/main.rs", "read src/main.rs start:10 end:20",
+    /// "status", "list", "check build",
     /// "register /path/file.xlsx sheets", "unregister ext-001"
     pub action: String,
-}
-
-/// Parameters for `slipstream_query` — read-only queries.
-///
-/// Queries: read, status, list, check.
-/// Examples: "read src/main.rs", "read src/main.rs start:10 end:20", "status", "list", "check build"
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct QueryParams {
-    /// Query string.
-    /// Examples: "read src/main.rs", "read src/main.rs start:10 end:20",
-    /// "read src/main.rs count:50", "read src/main.rs session:worker-1",
-    /// "status", "list", "check build"
-    pub q: String,
 }

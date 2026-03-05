@@ -478,10 +478,82 @@ fn handle_session_close(
         Err(resp) => return resp,
     };
 
+    // Flush before closing if requested (default: true)
+    let mut flush_info = None;
+    if params.flush {
+        match mgr.flush_session(&params.session_id, params.force) {
+            Ok(FlushResult::Ok { files_written, warnings }) => {
+                for f in &files_written {
+                    let canonical = mgr
+                        .canonical_path(&f.path)
+                        .unwrap_or_else(|_| f.path.clone());
+                    coordinator.mark_flushed(&canonical);
+                }
+                let files: Vec<FileWrittenInfo> = files_written
+                    .into_iter()
+                    .map(|f| FileWrittenInfo {
+                        path: f.path,
+                        edits_applied: f.edits_applied,
+                    })
+                    .collect();
+                let warnings: Vec<FlushWarningInfo> = warnings
+                    .into_iter()
+                    .map(|w| FlushWarningInfo {
+                        path: w.path,
+                        other_session: w.other_session.as_str().to_owned(),
+                        pending_edit_count: w.pending_edit_count,
+                    })
+                    .collect();
+                flush_info = Some(serde_json::json!({
+                    "files_written": files,
+                    "warnings": warnings,
+                }));
+            }
+            Ok(FlushResult::Conflict { conflicts }) => {
+                let data: Vec<ConflictData> = conflicts
+                    .into_iter()
+                    .map(|c| ConflictData {
+                        path: c.path,
+                        your_edits: c.your_edits,
+                        conflicting_edits: c.conflicting_edits,
+                        by_session: c.by_session.as_str().to_owned(),
+                        hint: "Re-read conflicting ranges and retry, or use force:true to overwrite"
+                            .into(),
+                    })
+                    .collect();
+                return Response::err(
+                    req.id,
+                    RpcError {
+                        code: protocol::ERR_CONFLICT,
+                        message: "conflicting edits detected on close — session NOT closed".into(),
+                        data: serde_json::to_value(data).ok(),
+                    },
+                );
+            }
+            Err(e) => {
+                // SessionNotFound is benign (already closing). Real I/O errors must be surfaced.
+                if !matches!(e, ManagerError::SessionNotFound(_)) {
+                    return Response::err(
+                        req.id,
+                        RpcError {
+                            code: protocol::ERR_INTERNAL,
+                            message: format!("flush failed before close: {e}"),
+                            data: None,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
     match mgr.close_session(&params.session_id) {
         Ok(()) => {
             coordinator.remove_closed_by_session(&params.session_id);
-            let resp = Response::ok(req.id, serde_json::json!({"status": "closed"}));
+            let mut result = serde_json::json!({"status": "closed"});
+            if let Some(fi) = flush_info {
+                result["flush"] = fi;
+            }
+            let resp = Response::ok(req.id, result);
             inject_digest(resp, coordinator, &cwd(), Some(&params.session_id))
         }
         Err(e) => match_manager_error(req.id, params.session_id.as_str(), e),

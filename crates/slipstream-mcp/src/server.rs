@@ -15,7 +15,7 @@ use tokio::sync::Mutex;
 use slipstream_cli::client::{Client, ClientError};
 
 use crate::params::*;
-use slipstream_cli::parse::{self, Query, SessionAction};
+use slipstream_cli::parse::{self, SessionAction};
 
 /// Inner state: connection config + optional connected client + named sessions.
 struct Inner {
@@ -42,10 +42,10 @@ impl Inner {
         let key = name.unwrap_or("default");
         self.sessions.get(key).cloned().ok_or_else(|| {
             if key == "default" {
-                "no active session. Use slipstream_session('open <files>') first.".to_string()
+                "no active session. Use ss_session('open <files>') first.".to_string()
             } else {
                 format!(
-                    "no active session '{key}'. Use slipstream_session('open <files> as:{key}') first."
+                    "no active session '{key}'. Use ss_session('open <files> as:{key}') first."
                 )
             }
         })
@@ -84,151 +84,101 @@ fn err_result(msg: String) -> Result<CallToolResult, McpError> {
     Ok(CallToolResult::success(vec![Content::text(format!("Error: {msg}"))]))
 }
 
-const HELP_TEXT: &str = r#"# Slipstream Reference Card
+const HELP_TEXT: &str = r#"# ss Reference Card
 
-## Quick Start — One-Shot Edit (most common pattern)
+## Quick Mode — Single Edit (most common)
 
-Edit files and flush to disk in a single call:
+Edit a file in one call — auto opens, edits, flushes, closes:
 ```
-slipstream(
-  files=["src/main.rs", "src/lib.rs"],
-  ops=[
-    {"method": "file.str_replace", "path": "src/main.rs", "old_str": "foo", "new_str": "bar"},
-    {"method": "file.str_replace", "path": "src/lib.rs", "old_str": "old_name", "new_str": "new_name", "replace_all": true}
-  ],
-  flush=true
-)
+ss(path="f.rs", old_str="foo", new_str="bar")
+ss(path="f.rs", old_str="foo", new_str="bar", replace_all=true)
 ```
+Same ergonomics as native Edit. ~25 output tokens. Fire-and-forget.
+
+## Batch Mode — Multiple Edits
+
+Edit multiple files in one call:
+```
+ss(ops=[
+  {"method": "file.str_replace", "path": "a.rs", "old_str": "x", "new_str": "y"},
+  {"method": "file.str_replace", "path": "b.rs", "old_str": "x", "new_str": "y"}
+])
+```
+Auto-opens all referenced files, applies edits, flushes, closes.
 
 Read files first, then edit:
 ```
-slipstream(
-  files=["src/main.rs"],
-  read_all=true,
-  ops=[{"method": "file.str_replace", "path": "src/main.rs", "old_str": "before", "new_str": "after"}],
-  flush=true
-)
+ss(ops=[
+  {"method": "file.str_replace", "path": "f.rs", "old_str": "before", "new_str": "after"}
+], read_all=true)
 ```
 
-## JSON Op Reference (all 4 verbs)
+## JSON Op Reference
 
-### file.str_replace — find and replace text (substring match)
+### file.str_replace — find and replace text
 ```json
 {"method": "file.str_replace", "path": "f.rs", "old_str": "foo", "new_str": "bar"}
 {"method": "file.str_replace", "path": "f.rs", "old_str": "foo", "new_str": "bar", "replace_all": true}
-{"method": "file.str_replace", "path": "f.rs", "old_str": "line1\nline2", "new_str": "new1\nnew2\nnew3"}
 ```
-- `old_str`: text to find (substring — no need for full lines)
-- `new_str`: replacement text
-- `replace_all`: replace every occurrence (default: false, errors if >1 match)
 
 ### file.write — insert or replace lines by position
 ```json
-{"method": "file.write", "path": "f.rs", "start": 0, "end": 0, "content": ["// header line"]}
-{"method": "file.write", "path": "f.rs", "start": 5, "end": 8, "content": ["replacement"]}
+{"method": "file.write", "path": "f.rs", "start": 0, "end": 0, "content": ["inserted line"]}
 ```
-- `start`/`end`: line range [start, end) — 0-indexed
-- `start == end`: insert at that line (no lines removed)
-- `content`: array of strings, one per line (also accepts `"lines"` as field name)
 
 ### file.read — read lines
 ```json
 {"method": "file.read", "path": "f.rs"}
 {"method": "file.read", "path": "f.rs", "start": 10, "end": 30}
-{"method": "file.read", "path": "f.rs", "count": 50}
 ```
 
-### cursor.move — set read cursor position
-```json
-{"method": "cursor.move", "path": "f.rs", "to": 100}
+## DSL Shorthand (alternative to JSON in ops array)
+```
+"str_replace f.rs old:\"foo\" new:\"bar\""
+"str_replace f.rs old:\"x\" new:\"y\" replace_all"
+"read f.rs start:0 end:20"
 ```
 
-## Two-Phase Batching
-
-When a batch contains both str_replace and replace_all ops on the same file, Slipstream automatically runs them in two phases:
-1. Non-replace_all ops execute first (edits queued on original buffer)
-2. replace_all ops run against the materialized result
-
-This means you can safely mix insertions and renames in one batch:
-```
-ops=[
-  {"method": "file.str_replace", "path": "f.rs", "old_str": "import { foo }", "new_str": "// header\nimport { bar }"},
-  {"method": "file.str_replace", "path": "f.rs", "old_str": "foo", "new_str": "bar", "replace_all": true}
-]
-```
-The replace_all sees the result of the first edit — no ordering issues.
-
-## DSL Shorthand (alternative to JSON)
-
-For simple ops, use DSL strings instead of JSON objects. Mix freely in the same array.
-```
-ops=[
-  "str_replace f.rs old:\"foo\" new:\"bar\"",
-  "str_replace f.rs old:\"x\" new:\"y\" replace_all",
-  "write f.rs start:0 end:0 content:\"// header\"",
-  "read f.rs start:0 end:20",
-  "cursor f.rs to:50"
-]
-```
-Escape sequences: `\n` → newline, `\\` → backslash, `\"` → quote.
-
-**When to use which**: JSON for multi-line content or special characters. DSL for quick single-line edits.
-
-## slipstream_session — lifecycle
+## ss_session — Lifecycle + Queries
 
 | Action | Example |
 |--------|---------|
 | open | `open src/main.rs src/lib.rs` |
 | open named | `open data.csv as:worker-1` |
-| flush | `flush` or `flush session:worker-1` |
-| flush force | `flush --force` |
-| close | `close` or `close session:worker-1` |
-| register | `register /path/file.xlsx sheets` |
-| unregister | `unregister ext-001` |
-
-## slipstream_query — read-only
-
-| Query | Example |
-|-------|---------|
-| read full | `read src/main.rs` |
-| read range | `read src/main.rs start:10 end:20` |
-| read cursor | `read src/main.rs count:50` |
+| flush | `flush` or `flush --force` |
+| close | `close` (auto-flushes) |
+| close discard | `close --no-flush` |
+| close force | `close --force` |
+| read | `read src/main.rs start:10 end:20` |
 | status | `status` |
 | list | `list` |
-| check build | `check build` |
+| check | `check build` |
 
-Note: `read` auto-opens files not in the session — no need to `open` first.
+Note: `read` auto-opens files not in the session.
 
-## Session Workflows
+## Common Workflows
 
-**Multi-turn session** (when you need to read before editing):
+**Quick edit** (most common):
 ```
-slipstream_session("open src/main.rs src/lib.rs")
-slipstream_query("read src/main.rs start:0 end:50")
-slipstream(ops=[{"method": "file.str_replace", "path": "src/main.rs", "old_str": "foo", "new_str": "bar"}])
-slipstream_session("flush")
-slipstream_session("close")
+ss(path="f.rs", old_str="old_code", new_str="new_code")
 ```
 
-**Concurrent named sessions**:
+**Multi-file batch**:
 ```
-slipstream_session("open f1.rs as:agent-a")
-slipstream_session("open f2.rs as:agent-b")
-slipstream(session="agent-a", ops=[...])
-slipstream(session="agent-b", ops=[...])
-slipstream_session("flush session:agent-a")
-slipstream_session("flush session:agent-b")
-slipstream_session("close session:agent-a")
-slipstream_session("close session:agent-b")
+ss(ops=[...edits across multiple files...])
+```
+
+**Read-then-edit session**:
+```
+ss_session("open src/main.rs")
+ss_session("read src/main.rs start:0 end:50")
+ss(ops=[...], session="default")
+ss_session("close")
 ```
 "#;
 
 /// Parse mixed DSL/JSON op items into JSON values for the daemon batch protocol.
-///
-/// Converts `OpItem`s to a JSON array, then delegates to the shared
-/// `normalize_ops` in `slipstream_cli::parse`.
-fn parse_ops(items: &[crate::params::OpItem]) -> Result<serde_json::Value, String> {
-    use crate::params::OpItem;
+fn parse_ops(items: &[OpItem]) -> Result<serde_json::Value, String> {
     let json_array: Vec<serde_json::Value> = items
         .iter()
         .map(|item| match item {
@@ -237,6 +187,22 @@ fn parse_ops(items: &[crate::params::OpItem]) -> Result<serde_json::Value, Strin
         })
         .collect();
     parse::normalize_ops(&serde_json::Value::Array(json_array))
+}
+
+/// Extract unique file paths from a JSON ops array for auto-open.
+fn extract_paths_from_ops(ops: &serde_json::Value) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut paths = Vec::new();
+    if let Some(arr) = ops.as_array() {
+        for op in arr {
+            if let Some(path) = op.get("path").and_then(|p| p.as_str()) {
+                if seen.insert(path) {
+                    paths.push(path.to_string());
+                }
+            }
+        }
+    }
+    paths
 }
 
 #[tool_router]
@@ -266,79 +232,90 @@ impl SlipstreamServer {
         }
     }
 
-    #[tool(description = "File editing operations. Two modes: (1) One-shot with files=[...] — auto open/close, self-contained. (2) Session mode (files omitted) — ops run on active session. Ops are JSON objects or DSL strings (mix freely). JSON examples: {\"method\": \"file.str_replace\", \"path\": \"f.rs\", \"old_str\": \"foo\", \"new_str\": \"bar\"} — add \"replace_all\": true to replace all occurrences. {\"method\": \"file.write\", \"path\": \"f.rs\", \"start\": 0, \"end\": 0, \"content\": [\"inserted line\"]} — start==end inserts, start<end replaces. {\"method\": \"file.read\", \"path\": \"f.rs\", \"start\": 0, \"end\": 20}. Use read_all=true to get file contents, flush=true to write to disk.")]
-    async fn slipstream(
+    #[tool(description = "File editing operations. Two modes: (1) Quick mode with path/old_str/new_str — single str_replace, auto open/flush/close. (2) Batch mode with ops=[...] — multiple edits across files. JSON examples: {\"method\": \"file.str_replace\", \"path\": \"f.rs\", \"old_str\": \"foo\", \"new_str\": \"bar\"} — add \"replace_all\": true to replace all occurrences. {\"method\": \"file.write\", \"path\": \"f.rs\", \"start\": 0, \"end\": 0, \"content\": [\"inserted line\"]} — start==end inserts, start<end replaces. {\"method\": \"file.read\", \"path\": \"f.rs\", \"start\": 0, \"end\": 20}. Use read_all=true to get file contents. Flush defaults to true.")]
+    async fn ss(
         &self,
-        Parameters(p): Parameters<SlipstreamParams>,
+        Parameters(p): Parameters<SsParams>,
     ) -> Result<CallToolResult, McpError> {
-        // Parse ops (DSL strings and/or JSON objects) → JSON array
-        let json_ops = match p.ops {
-            Some(ref items) => match parse_ops(items) {
-                Ok(ops) => Some(ops),
-                Err(msg) => return err_result(msg),
-            },
-            None => None,
-        };
-
-        if let Some(files) = p.files {
-            // --- One-shot mode: open → read? → ops? → flush? → close ---
-            self.exec_one_shot(files, json_ops, p.read_all, p.flush, p.force).await
-        } else {
-            // --- Session mode: look up named session → batch ---
-            let mut inner = self.inner.lock().await;
-
-            // Resolve session before borrowing client
-            let session_id = match inner.resolve_session(p.session.as_deref()) {
-                Ok(id) => id,
-                Err(msg) => return err_result(msg),
+        // Quick mode: path + old_str + new_str → single str_replace
+        if let Some(ref path) = p.path {
+            let old_str = match p.old_str {
+                Some(ref s) => s.clone(),
+                None => return err_result("quick mode requires old_str".to_string()),
             };
-            let session_label = p.session.as_deref().unwrap_or("default").to_string();
-
-            // If no ops, just return session info
-            let ops = match json_ops {
-                Some(ops) => ops,
-                None => {
-                    return Ok(CallToolResult::success(vec![Content::text(
-                        format!("Session '{session_label}' active (id: {session_id}). Pass ops to apply operations.")
-                    )]));
-                }
+            let new_str = match p.new_str {
+                Some(ref s) => s.clone(),
+                None => return err_result("quick mode requires new_str".to_string()),
             };
+            let replace_all = p.replace_all.unwrap_or(false);
 
-            let client = match inner.ensure_connected().await {
-                Ok(c) => c,
-                Err(e) => return to_tool_result(Err(e)),
-            };
-
-            let mut output = serde_json::Map::new();
-
-            // Apply batch ops
-            match client.request("batch", serde_json::json!({
-                "session_id": session_id,
-                "ops": ops,
-            })).await {
-                Ok(v) => { output.insert("batch".to_string(), v); }
-                Err(e) => return to_tool_result(Err(e)),
+            let mut op = serde_json::json!({
+                "method": "file.str_replace",
+                "path": path,
+                "old_str": old_str,
+                "new_str": new_str,
+            });
+            if replace_all {
+                op["replace_all"] = serde_json::json!(true);
             }
 
-            // Flush if requested
-            if p.flush {
-                match client.request("session.flush", serde_json::json!({
-                    "session_id": session_id,
-                    "force": p.force,
-                })).await {
-                    Ok(v) => { output.insert("flush".to_string(), v); }
-                    Err(e) => return to_tool_result(Err(e)),
+            let ops = serde_json::Value::Array(vec![op]);
+            let files = vec![path.clone()];
+
+            // If there's an active session (explicit or default), use it instead of one-shot
+            {
+                let session_name = p.session.as_deref().unwrap_or("default");
+                let inner = self.inner.lock().await;
+                if inner.sessions.contains_key(session_name) {
+                    drop(inner);
+                    return self.exec_session_ops(p.session.as_deref(), ops, p.flush, p.force).await;
                 }
             }
 
-            to_tool_result(Ok(serde_json::Value::Object(output)))
+            return self.exec_one_shot(files, Some(ops), p.read_all, p.flush, p.force).await;
         }
+
+        // Batch mode: ops array
+        if let Some(ref items) = p.ops {
+            let json_ops = match parse_ops(items) {
+                Ok(ops) => ops,
+                Err(msg) => return err_result(msg),
+            };
+
+            // If a named session is active, use session mode
+            if let Some(ref session_name) = p.session {
+                let inner = self.inner.lock().await;
+                if inner.sessions.contains_key(session_name) {
+                    drop(inner);
+                    return self.exec_session_ops(p.session.as_deref(), json_ops, p.flush, p.force).await;
+                }
+            }
+
+            // Check default session too
+            if p.session.is_none() {
+                let inner = self.inner.lock().await;
+                if inner.sessions.contains_key("default") {
+                    drop(inner);
+                    return self.exec_session_ops(None, json_ops, p.flush, p.force).await;
+                }
+            }
+
+            // Auto-open: extract paths from ops and use one-shot mode
+            let files = extract_paths_from_ops(&json_ops);
+            if files.is_empty() {
+                return err_result("no file paths found in ops".to_string());
+            }
+            return self.exec_one_shot(files, Some(json_ops), p.read_all, p.flush, p.force).await;
+        }
+
+        // Neither path nor ops provided
+        err_result("provide either path (quick mode) or ops (batch mode)".to_string())
     }
 
-    #[tool(description = "Session lifecycle. Actions: open <files> [as:name], flush [--force] [session:name], close [session:name], register <path> <handler>, unregister <id>. Default session is implicit — most usage never needs naming.")]
-    async fn slipstream_session(
+    #[tool(description = "Session lifecycle and queries. Actions: open <files> [as:name], flush [--force] [session:name], close [--no-flush] [--force] [session:name], read <path> [start:N end:N | count:N] [session:name], status, list, check <action>, register <path> <handler>, unregister <id>. Close auto-flushes by default.")]
+    async fn ss_session(
         &self,
-        Parameters(p): Parameters<SessionActionParams>,
+        Parameters(p): Parameters<SsSessionParams>,
     ) -> Result<CallToolResult, McpError> {
         let action = match parse::parse_session_action(&p.action) {
             Ok(a) => a,
@@ -351,7 +328,6 @@ impl SlipstreamServer {
             SessionAction::Open { files, name } => {
                 let session_name = name.unwrap_or_else(|| "default".to_string());
 
-                // Check if name already in use
                 if inner.sessions.contains_key(&session_name) {
                     return err_result(format!(
                         "session '{session_name}' already active. Close it first or use a different name."
@@ -379,7 +355,6 @@ impl SlipstreamServer {
                 to_tool_result(result)
             }
             SessionAction::Flush { name, force } => {
-                // Resolve before borrowing client
                 let session_id = match inner.resolve_session(name.as_deref()) {
                     Ok(id) => id,
                     Err(msg) => return err_result(msg),
@@ -396,7 +371,7 @@ impl SlipstreamServer {
                     .await;
                 to_tool_result(result)
             }
-            SessionAction::Close { name } => {
+            SessionAction::Close { name, flush, force } => {
                 let session_name = name.as_deref().unwrap_or("default").to_string();
                 let session_id = match inner.resolve_session(Some(&session_name)) {
                     Ok(id) => id,
@@ -409,10 +384,11 @@ impl SlipstreamServer {
                 let result = client
                     .request("session.close", serde_json::json!({
                         "session_id": session_id,
+                        "flush": flush,
+                        "force": force,
                     }))
                     .await;
 
-                // Remove from map on success
                 if result.is_ok() {
                     inner.sessions.remove(&session_name);
                 }
@@ -444,28 +420,11 @@ impl SlipstreamServer {
                     .await;
                 to_tool_result(result)
             }
-        }
-    }
-
-    #[tool(description = "Read-only queries. Actions: read <path> [start:N end:N | count:N] [session:name], status, list, check <action>.")]
-    async fn slipstream_query(
-        &self,
-        Parameters(p): Parameters<QueryParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let query = match parse::parse_query(&p.q) {
-            Ok(q) => q,
-            Err(msg) => return err_result(msg),
-        };
-
-        let mut inner = self.inner.lock().await;
-
-        match query {
-            Query::Read { path, session, start, end, count } => {
+            SessionAction::Read { path, session, start, end, count } => {
                 // Resolve session — if none exists, auto-create default and open the file
                 let session_id = match inner.resolve_session(session.as_deref()) {
                     Ok(id) => id,
                     Err(_) => {
-                        // No session exists — create default by opening this file
                         let client = match inner.ensure_connected().await {
                             Ok(c) => c,
                             Err(e) => return to_tool_result(Err(e)),
@@ -504,32 +463,10 @@ impl SlipstreamServer {
                 if let Some(c) = count {
                     params["count"] = serde_json::json!(c);
                 }
-                let result = client.request("file.read", params.clone()).await;
-
-                // If file not in session, auto-open it and retry
-                match &result {
-                    Err(ClientError::Rpc { message, .. }) if message.contains("not in session") => {
-                        // Add the file to the existing session
-                        let open_result = client
-                            .request("session.open_file", serde_json::json!({
-                                "session_id": session_id,
-                                "path": &path,
-                            }))
-                            .await;
-                        // session.open_file may not exist — fall back to reporting the original error
-                        if open_result.is_ok() {
-                            let retry = client.request("file.read", params).await;
-                            to_tool_result(retry)
-                        } else {
-                            // The daemon doesn't support adding files to existing sessions,
-                            // so just report the original error clearly
-                            to_tool_result(result)
-                        }
-                    }
-                    _ => to_tool_result(result),
-                }
+                let result = client.request("file.read", params).await;
+                to_tool_result(result)
             }
-            Query::Status => {
+            SessionAction::Status => {
                 let client = match inner.ensure_connected().await {
                     Ok(c) => c,
                     Err(e) => return to_tool_result(Err(e)),
@@ -539,7 +476,7 @@ impl SlipstreamServer {
                     .await;
                 to_tool_result(result)
             }
-            Query::List => {
+            SessionAction::List => {
                 let client = match inner.ensure_connected().await {
                     Ok(c) => c,
                     Err(e) => return to_tool_result(Err(e)),
@@ -549,7 +486,7 @@ impl SlipstreamServer {
                     .await;
                 to_tool_result(result)
             }
-            Query::Check { action } => {
+            SessionAction::Check { action } => {
                 let client = match inner.ensure_connected().await {
                     Ok(c) => c,
                     Err(e) => return to_tool_result(Err(e)),
@@ -562,14 +499,15 @@ impl SlipstreamServer {
         }
     }
 
-    #[tool(description = "Show reference card with ops format, session actions, query syntax, and common workflows.")]
-    async fn slipstream_help(&self) -> Result<CallToolResult, McpError> {
+    #[tool(description = "Show reference card with quick mode, batch mode, ops format, session actions, and common workflows.")]
+    async fn ss_help(&self) -> Result<CallToolResult, McpError> {
         Ok(CallToolResult::success(vec![Content::text(HELP_TEXT)]))
     }
 }
 
 impl SlipstreamServer {
     /// One-shot mode: open → read? → ops? → flush? → close.
+    /// Close now auto-flushes via daemon, so we skip the separate flush step.
     async fn exec_one_shot(
         &self,
         files: Vec<String>,
@@ -619,6 +557,7 @@ impl SlipstreamServer {
                 Err(e) => {
                     let _ = client.request("session.close", serde_json::json!({
                         "session_id": session_id,
+                        "flush": false,
                     })).await;
                     return to_tool_result(Err(e));
                 }
@@ -635,36 +574,70 @@ impl SlipstreamServer {
                 Err(e) => {
                     let _ = client.request("session.close", serde_json::json!({
                         "session_id": session_id,
+                        "flush": false,
                     })).await;
                     return to_tool_result(Err(e));
                 }
             }
         }
 
-        // 4. Flush if requested
+        // 4. Close (with auto-flush handled by daemon)
+        match client.request("session.close", serde_json::json!({
+            "session_id": session_id,
+            "flush": flush,
+            "force": force,
+        })).await {
+            Ok(v) => { output.insert("close".to_string(), v); }
+            Err(e) => return to_tool_result(Err(e)),
+        }
+
+        to_tool_result(Ok(serde_json::Value::Object(output)))
+    }
+
+    /// Session mode: apply ops to an existing named session.
+    async fn exec_session_ops(
+        &self,
+        session_name: Option<&str>,
+        ops: serde_json::Value,
+        flush: bool,
+        force: bool,
+    ) -> Result<CallToolResult, McpError> {
+        let mut inner = self.inner.lock().await;
+
+        let session_id = match inner.resolve_session(session_name) {
+            Ok(id) => id,
+            Err(msg) => return err_result(msg),
+        };
+        let session_label = session_name.unwrap_or("default").to_string();
+
+        let client = match inner.ensure_connected().await {
+            Ok(c) => c,
+            Err(e) => return to_tool_result(Err(e)),
+        };
+
+        let mut output = serde_json::Map::new();
+
+        // Apply batch ops
+        match client.request("batch", serde_json::json!({
+            "session_id": session_id,
+            "ops": ops,
+        })).await {
+            Ok(v) => { output.insert("batch".to_string(), v); }
+            Err(e) => return to_tool_result(Err(e)),
+        }
+
+        // Flush if requested
         if flush {
             match client.request("session.flush", serde_json::json!({
                 "session_id": session_id,
                 "force": force,
             })).await {
                 Ok(v) => { output.insert("flush".to_string(), v); }
-                Err(e) => {
-                    let _ = client.request("session.close", serde_json::json!({
-                        "session_id": session_id,
-                    })).await;
-                    return to_tool_result(Err(e));
-                }
+                Err(e) => return to_tool_result(Err(e)),
             }
         }
 
-        // 5. Always close
-        match client.request("session.close", serde_json::json!({
-            "session_id": session_id,
-        })).await {
-            Ok(v) => { output.insert("close".to_string(), v); }
-            Err(e) => return to_tool_result(Err(e)),
-        }
-
+        let _ = session_label; // used for future diagnostics
         to_tool_result(Ok(serde_json::Value::Object(output)))
     }
 }
@@ -674,14 +647,14 @@ impl ServerHandler for SlipstreamServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(
-                "Slipstream is a file session coordinator. It tracks all files across native text editing and external format handlers (FCP servers for .xlsx, .drawio, .mid, .tf). \
-                 Open files with slipstream_session('open <files>') — for native text files (py, rs, ts, etc.), you get a session for editing. \
-                 For external formats (xlsx, drawio, mid, tf), you get guidance on which FCP tool to use. \
-                 IMPORTANT: Use slipstream_str_replace (or file.str_replace in batch) for all text edits — it matches exact text without line numbers. \
-                 After opening external files in their FCP tool, call slipstream_session('register <path> <handler>') to track them. \
-                 Before running a build, call slipstream_query('check build') to verify all files are saved. \
-                 Call slipstream_query('status') at any time to see the full state of all tracked files. \
-                 Use slipstream_query('list') for a lightweight view of just active sessions with file counts.".into()
+                "Slipstream is a file session coordinator. \
+                 Use ss(path=\"f.rs\", old_str=\"old\", new_str=\"new\") for quick single edits — auto opens, edits, flushes, closes. \
+                 Use ss(ops=[...]) for batch edits across multiple files. \
+                 Use ss_session('open <files>') for multi-turn sessions. \
+                 Use ss_session('read <path>') to read files. \
+                 Use ss_session('close') to close (auto-flushes). \
+                 Use ss_session('status') or ss_session('list') to check state. \
+                 Use ss_session('check build') before running builds.".into()
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             ..Default::default()

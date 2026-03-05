@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-/// Parsed session lifecycle action.
+/// Parsed session lifecycle action (includes query verbs since ss_session merges both).
 #[derive(Debug, PartialEq)]
 pub enum SessionAction {
     Open {
@@ -18,6 +18,10 @@ pub enum SessionAction {
     },
     Close {
         name: Option<String>,
+        /// Flush before closing (default: true). Use `--no-flush` to skip.
+        flush: bool,
+        /// Force flush past conflicts. Use `--force`.
+        force: bool,
     },
     Register {
         path: String,
@@ -25,6 +29,19 @@ pub enum SessionAction {
     },
     Unregister {
         tracking_id: String,
+    },
+    // Query verbs (merged from slipstream_query)
+    Read {
+        path: String,
+        session: Option<String>,
+        start: Option<usize>,
+        end: Option<usize>,
+        count: Option<usize>,
+    },
+    Status,
+    List,
+    Check {
+        action: String,
     },
 }
 
@@ -103,7 +120,9 @@ pub fn parse_session_action(input: &str) -> Result<SessionAction, String> {
         "close" => {
             let kwargs = parse_kwargs(rest);
             let name = kwargs.get("session").cloned();
-            Ok(SessionAction::Close { name })
+            let flush = !rest.iter().any(|t| *t == "--no-flush");
+            let force = rest.iter().any(|t| *t == "--force");
+            Ok(SessionAction::Close { name, flush, force })
         }
         "register" => {
             // register <path> <handler>
@@ -124,8 +143,49 @@ pub fn parse_session_action(input: &str) -> Result<SessionAction, String> {
                 tracking_id: rest[0].to_string(),
             })
         }
+        // Query verbs (merged from parse_query)
+        "read" => {
+            if rest.is_empty() {
+                return Err("read requires a file path".to_string());
+            }
+            let path = rest[0].to_string();
+            let kwargs = parse_kwargs(&rest[1..]);
+            let session = kwargs.get("session").cloned();
+            let start = kwargs
+                .get("start")
+                .map(|v| v.parse::<usize>())
+                .transpose()
+                .map_err(|_| "invalid start value".to_string())?;
+            let end = kwargs
+                .get("end")
+                .map(|v| v.parse::<usize>())
+                .transpose()
+                .map_err(|_| "invalid end value".to_string())?;
+            let count = kwargs
+                .get("count")
+                .map(|v| v.parse::<usize>())
+                .transpose()
+                .map_err(|_| "invalid count value".to_string())?;
+            Ok(SessionAction::Read {
+                path,
+                session,
+                start,
+                end,
+                count,
+            })
+        }
+        "status" => Ok(SessionAction::Status),
+        "list" => Ok(SessionAction::List),
+        "check" => {
+            if rest.is_empty() {
+                return Err("check requires an action (e.g. 'check build')".to_string());
+            }
+            Ok(SessionAction::Check {
+                action: rest[0].to_string(),
+            })
+        }
         other => Err(format!(
-            "unknown action '{other}'. Expected: open, flush, close, register, unregister"
+            "unknown action '{other}'. Expected: open, flush, close, read, status, list, check, register, unregister"
         )),
     }
 }
@@ -670,7 +730,7 @@ mod tests {
     #[test]
     fn close_default() {
         let a = parse_session_action("close").unwrap();
-        assert_eq!(a, SessionAction::Close { name: None });
+        assert_eq!(a, SessionAction::Close { name: None, flush: true, force: false });
     }
 
     #[test]
@@ -680,7 +740,59 @@ mod tests {
             a,
             SessionAction::Close {
                 name: Some("worker-1".into()),
+                flush: true,
+                force: false,
             }
+        );
+    }
+
+    #[test]
+    fn close_no_flush() {
+        let a = parse_session_action("close --no-flush").unwrap();
+        assert_eq!(a, SessionAction::Close { name: None, flush: false, force: false });
+    }
+
+    #[test]
+    fn close_force() {
+        let a = parse_session_action("close --force").unwrap();
+        assert_eq!(a, SessionAction::Close { name: None, flush: true, force: true });
+    }
+
+    #[test]
+    fn close_force_named() {
+        let a = parse_session_action("close --force session:w1").unwrap();
+        assert_eq!(a, SessionAction::Close { name: Some("w1".into()), flush: true, force: true });
+    }
+
+    // --- Query verbs in parse_session_action ---
+
+    #[test]
+    fn session_action_read() {
+        let a = parse_session_action("read src/main.rs start:10 end:20").unwrap();
+        assert_eq!(a, SessionAction::Read {
+            path: "src/main.rs".into(),
+            session: None,
+            start: Some(10),
+            end: Some(20),
+            count: None,
+        });
+    }
+
+    #[test]
+    fn session_action_status() {
+        assert_eq!(parse_session_action("status").unwrap(), SessionAction::Status);
+    }
+
+    #[test]
+    fn session_action_list() {
+        assert_eq!(parse_session_action("list").unwrap(), SessionAction::List);
+    }
+
+    #[test]
+    fn session_action_check() {
+        assert_eq!(
+            parse_session_action("check build").unwrap(),
+            SessionAction::Check { action: "build".into() }
         );
     }
 

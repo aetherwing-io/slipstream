@@ -57,6 +57,16 @@ pub struct FileWrittenInfo {
 #[derive(Debug, Deserialize)]
 pub struct SessionCloseParams {
     pub session_id: SessionId,
+    /// Flush dirty edits to disk before closing (default: true).
+    #[serde(default = "default_true")]
+    pub flush: bool,
+    /// Force flush past conflicts (default: false).
+    #[serde(default)]
+    pub force: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 // --- file.read ---
