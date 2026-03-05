@@ -50,11 +50,11 @@ pub struct SsParams {
     /// Read all files before applying ops (batch mode only)
     #[serde(default)]
     pub read_all: bool,
-    /// Flush edits to disk after ops (default: true — fire-and-forget)
     #[serde(default = "default_true")]
+    #[schemars(skip)]
     pub flush: bool,
-    /// Force flush past conflicts
     #[serde(default)]
+    #[schemars(skip)]
     pub force: bool,
     /// Named session (rarely needed — most usage is one-shot)
     pub session: Option<String>,

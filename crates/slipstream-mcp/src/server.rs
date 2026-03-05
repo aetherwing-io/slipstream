@@ -163,18 +163,21 @@ Note: `read` auto-opens files not in the session.
 ss(path="f.rs", old_str="old_code", new_str="new_code")
 ```
 
-**Multi-file batch**:
+**Multi-file batch** (self-contained — no open/close needed):
 ```
 ss(ops=[...edits across multiple files...])
 ```
 
-**Read-then-edit session**:
+**Read-then-edit** (only when you need to inspect files first):
 ```
 ss_session("open src/main.rs")
 ss_session("read src/main.rs start:0 end:50")
 ss(ops=[...], session="default")
 ss_session("close")
 ```
+
+Note: ss() quick mode and batch mode are fully self-contained.
+Only use ss_session("open") when you need a persistent session for reading.
 "#;
 
 /// Parse mixed DSL/JSON op items into JSON values for the daemon batch protocol.
@@ -232,7 +235,7 @@ impl SlipstreamServer {
         }
     }
 
-    #[tool(description = "File editing operations. Two modes: (1) Quick mode with path/old_str/new_str — single str_replace, auto open/flush/close. (2) Batch mode with ops=[...] — multiple edits across files. JSON examples: {\"method\": \"file.str_replace\", \"path\": \"f.rs\", \"old_str\": \"foo\", \"new_str\": \"bar\"} — add \"replace_all\": true to replace all occurrences. {\"method\": \"file.write\", \"path\": \"f.rs\", \"start\": 0, \"end\": 0, \"content\": [\"inserted line\"]} — start==end inserts, start<end replaces. {\"method\": \"file.read\", \"path\": \"f.rs\", \"start\": 0, \"end\": 20}. Use read_all=true to get file contents. Flush defaults to true.")]
+    #[tool(description = "File editing operations. Two modes — both are self-contained (auto open/flush/close). Do NOT call ss_session('open') before using ss(). (1) Quick mode: ss(path, old_str, new_str) — single str_replace. (2) Batch mode: ss(ops=[...]) — multiple edits across files in one call. JSON op examples: {\"method\": \"file.str_replace\", \"path\": \"f.rs\", \"old_str\": \"foo\", \"new_str\": \"bar\"} — add \"replace_all\": true to replace all occurrences. {\"method\": \"file.write\", \"path\": \"f.rs\", \"start\": 0, \"end\": 0, \"content\": [\"inserted line\"]} — start==end inserts, start<end replaces. {\"method\": \"file.read\", \"path\": \"f.rs\", \"start\": 0, \"end\": 20}. Use read_all=true to get file contents.")]
     async fn ss(
         &self,
         Parameters(p): Parameters<SsParams>,
@@ -649,8 +652,8 @@ impl ServerHandler for SlipstreamServer {
             instructions: Some(
                 "Slipstream is a file session coordinator. \
                  Use ss(path=\"f.rs\", old_str=\"old\", new_str=\"new\") for quick single edits — auto opens, edits, flushes, closes. \
-                 Use ss(ops=[...]) for batch edits across multiple files. \
-                 Use ss_session('open <files>') for multi-turn sessions. \
+                 Use ss(ops=[...]) for batch edits across multiple files — also self-contained, no setup needed. \
+                 Use ss_session('open <files>') ONLY for multi-turn sessions where you need to read before editing. \
                  Use ss_session('read <path>') to read files. \
                  Use ss_session('close') to close (auto-flushes). \
                  Use ss_session('status') or ss_session('list') to check state. \
