@@ -609,15 +609,15 @@
       <tbody>
         <tr>
           <td class="val">ss</td>
-          <td class="tool-desc">Self-contained file edits. Quick mode (path + old_str + new_str) or batch mode (ops array). Auto opens, edits, flushes, closes.</td>
+          <td class="tool-desc">Edit files. <code style="color:var(--ice);font-size:12px">ss(path, old_str, new_str)</code> for one edit. <code style="color:var(--ice);font-size:12px">ss(ops=[...])</code> for many. Self-contained &mdash; no setup needed.</td>
         </tr>
         <tr>
           <td class="val">ss_session</td>
-          <td class="tool-desc">Session lifecycle and queries. open, flush, close, read, status, list, check. For multi-turn workflows where you need to read before editing.</td>
+          <td class="tool-desc">Read files and manage sessions. <code style="color:var(--ice);font-size:12px">ss_session("read &lt;path&gt;")</code> to read. Run <code style="color:var(--ice);font-size:12px">ss_help</code> for advanced session control.</td>
         </tr>
         <tr>
           <td class="val">ss_help</td>
-          <td class="tool-desc">Reference card with ops format, session actions, and common workflows.</td>
+          <td class="tool-desc">Full reference card &mdash; ops format, session control, advanced options.</td>
         </tr>
       </tbody>
     </table>
@@ -656,9 +656,9 @@
         <p>Edits accumulate in memory, hit disk only on flush. Streaming writes with content hashing &#8212; no full-file allocation.</p>
       </div>
       <div class="feature-card">
-        <div class="feature-label">DSL + JSON</div>
-        <h3>Two syntaxes, one array</h3>
-        <p>DSL for quick edits ("str_replace f.rs old:\"foo\" new:\"bar\""), JSON for multi-line content. Both in the same ops array.</p>
+        <div class="feature-label">Compact Output</div>
+        <h3>60% fewer tokens</h3>
+        <p>FCP-style prefix lines (<code style="color:var(--ice)">~</code> edit, <code style="color:var(--ice)">&gt;</code> flush, <code style="color:var(--ice)">@</code> read, <code style="color:var(--ice)">!</code> error) plus a status bar. No JSON walls. Same information, fraction of the cost.</p>
       </div>
     </div>
   </section>
@@ -733,64 +733,44 @@
     {
       title: 'quick edit',
       mcp: [
-        { t: 'c', s: '# one edit, one call — auto opens, edits, flushes, closes' },
+        { t: 'c', s: '# one edit, one call' },
         { t: '>', s: 'ss(path="config_loader.py", old_str="import json",' },
         { t: ' ', s: '   new_str="import json\\nimport logging\\nlogger = logging.getLogger(__name__)")' },
         { t: '' },
-        { t: 'r', s: 'open    config_loader.py  58 lines, v1' },
-        { t: 'h', s: 'batch   1 edit queued     match_line: 3, match_count: 1' },
-        { t: 'h', s: 'flush   1 file written    config_loader.py (1 edit applied)' },
-        { t: 'r', s: 'close   status: closed' },
-        { t: '' },
-        { t: 'r', s: 'digest  1 file tracked, 0 dirty, 0 external changes' },
-        { t: 'r', s: 'session 45722eab-c70d-4f9c-b8d7-43da40b16046' },
+        { t: 'h', s: '~ config_loader.py:3 str_replace (1 match)' },
+        { t: 'h', s: '> config_loader.py (1 edit)' },
+        { t: 'r', s: '[1f 1e flush:ok closed]' },
       ],
       cli: [
         { t: 'c', s: '# same edit via CLI' },
         { t: '$', s: "slipstream exec --files config_loader.py \\" },
-        { t: ' ', s: "  --ops '[{\"method\":\"file.str_replace\",\"path\":\"config_loader.py\"," },
+        { t: ' ', s: "  --ops '[{\"method\":\"file.str_replace\"," },
         { t: ' ', s: "    \"old_str\":\"import json\"," },
-        { t: ' ', s: "    \"new_str\":\"import json\\nimport logging\\nlogger = ...\"}]' \\" },
+        { t: ' ', s: "    \"new_str\":\"import json\\nimport logging\\n...\"}]' \\" },
         { t: ' ', s: "  --flush" },
         { t: '' },
-        { t: 'r', s: 'open    config_loader.py  58 lines, v1' },
-        { t: 'h', s: 'batch   1 edit queued     match_line: 3, match_count: 1' },
-        { t: 'h', s: 'flush   1 file written    config_loader.py (1 edit applied)' },
-        { t: 'r', s: 'close   status: closed' },
-        { t: '' },
-        { t: 'r', s: 'digest  1 file tracked, 0 dirty, 0 external changes' },
-        { t: 'r', s: 'session d7c81149-59d4-46c0-af7a-d6e2004a61f3' },
+        { t: 'h', s: '~ config_loader.py:3 str_replace (1 match)' },
+        { t: 'h', s: '> config_loader.py (1 edit)' },
+        { t: 'r', s: '[1f 1e flush:ok closed]' },
       ]
     },
     {
       title: 'batch — 5 ops, 3 files',
       mcp: [
-        { t: 'c', s: '# copyright headers + renames across 3 files, one tool call' },
+        { t: 'c', s: '# 5 ops across 3 files, one tool call' },
         { t: '>', s: 'ss(ops=[' },
         { t: ' ', s: '  {"method":"file.write","path":"auth_service.py",' },
         { t: ' ', s: '   "start":0,"end":0,"content":["# Copyright 2026 Acme Corp"]},' },
-        { t: ' ', s: '  ...2 more file.write ops...,' },
-        { t: ' ', s: '  {"method":"file.str_replace","path":"auth_service.py",' },
-        { t: ' ', s: '   "old_str":"get_connection","new_str":"acquire_connection","replace_all":true},' },
-        { t: ' ', s: '  ...1 more str_replace op...' },
+        { t: ' ', s: '  ...4 more ops...' },
         { t: '>', s: '])' },
         { t: '' },
-        { t: 'r', s: 'open    3 files loaded    auth_service.py (46 lines)' },
-        { t: 'r', s: '                          order_service.py (58 lines)' },
-        { t: 'r', s: '                          user_service.py (42 lines)' },
-        { t: '' },
-        { t: 'r', s: 'batch   op 1  write       edits_pending: 1' },
-        { t: 'r', s: '        op 2  write       edits_pending: 1' },
-        { t: 'r', s: '        op 3  write       edits_pending: 1' },
-        { t: 'h', s: '        op 4  str_replace match_count: 3 (3 occurrences replaced)' },
-        { t: 'h', s: '        op 5  str_replace match_count: 5 (5 occurrences replaced)' },
-        { t: '' },
-        { t: 'h', s: 'flush   3 files written   auth_service.py  (1 edit applied)' },
-        { t: 'h', s: '                          order_service.py (1 edit applied)' },
-        { t: 'h', s: '                          user_service.py  (1 edit applied)' },
-        { t: 'r', s: 'close   status: closed' },
-        { t: '' },
-        { t: 'r', s: 'digest  3 files tracked, 0 dirty, 0 external changes' },
+        { t: 'h', s: '~ auth_service.py:0 write 1L inserted' },
+        { t: 'h', s: '~ order_service.py:0 write 1L inserted' },
+        { t: 'h', s: '~ user_service.py:0 write 1L inserted' },
+        { t: 'h', s: '~ auth_service.py str_replace (3 matches, replace_all)' },
+        { t: 'h', s: '~ user_service.py str_replace (5 matches, replace_all)' },
+        { t: 'h', s: '> auth_service.py (2) \u00b7 order_service.py (1) \u00b7 user_service.py (2)' },
+        { t: 'r', s: '[3f 5e flush:ok closed]' },
       ],
       cli: [
         { t: 'c', s: '# same 5 ops via CLI heredoc' },
@@ -798,57 +778,80 @@
         { t: ' ', s: "  --files auth_service.py user_service.py order_service.py \\" },
         { t: ' ', s: "  --ops @- --flush <<'OPS'" },
         { t: ' ', s: '[{"method":"file.write","path":"auth_service.py",' },
-        { t: ' ', s: '  "start":0,"end":0,"content":["# Copyright 2026 Acme Corp"]},' },
-        { t: ' ', s: ' ...4 more ops...' },
+        { t: ' ', s: '  "start":0,"end":0,"content":["# Copyright 2026"]},' },
+        { t: ' ', s: ' ...4 more ops...]' },
         { t: '$', s: "OPS" },
         { t: '' },
-        { t: 'r', s: 'open    3 files loaded    auth/order/user_service.py' },
-        { t: '' },
-        { t: 'r', s: 'batch   op 1-3  write       edits_pending: 1 each' },
-        { t: 'h', s: '        op 4    str_replace  match_count: 3' },
-        { t: 'h', s: '        op 5    str_replace  match_count: 5' },
-        { t: '' },
-        { t: 'h', s: 'flush   3 files written   warnings: []' },
-        { t: 'r', s: 'close   status: closed' },
-        { t: '' },
-        { t: 'r', s: 'digest  3 files tracked, 0 dirty, 0 external' },
-        { t: 'r', s: 'session 789f8717-f95b-4535-98e4-00d753454da5' },
+        { t: 'h', s: '~ auth_service.py:0 write 1L inserted' },
+        { t: 'h', s: '~ order_service.py:0 write 1L inserted' },
+        { t: 'h', s: '~ user_service.py:0 write 1L inserted' },
+        { t: 'h', s: '~ auth_service.py str_replace (3 matches, replace_all)' },
+        { t: 'h', s: '~ user_service.py str_replace (5 matches, replace_all)' },
+        { t: 'h', s: '> auth_service.py (2) \u00b7 order_service.py (1) \u00b7 user_service.py (2)' },
+        { t: 'r', s: '[3f 5e flush:ok closed]' },
       ]
     },
     {
       title: 'read file',
       mcp: [
-        { t: 'c', s: '# read auto-opens — no session setup needed' },
+        { t: 'c', s: '# read — no session setup needed' },
         { t: '>', s: 'ss_session("read auth_service.py start:0 end:8")' },
         { t: '' },
-        { t: 'r', s: 'cursor: 8' },
-        { t: 'r', s: 'lines:' },
-        { t: 'h', s: '  0  "# Copyright 2026 Acme Corp"' },
-        { t: 'r', s: '  1  "from dataclasses import dataclass"' },
-        { t: 'r', s: '  2  "from typing import Optional"' },
-        { t: 'h', s: '  3  "from db_pool import acquire_connection"' },
-        { t: 'r', s: '  4  ""' },
-        { t: 'r', s: '  5  ""' },
-        { t: 'r', s: '  6  "@dataclass"' },
-        { t: 'r', s: '  7  "class AuthToken:"' },
+        { t: 'h', s: '@ auth_service.py:0-8 (8L cursor:8)' },
+        { t: 'r', s: '# Copyright 2026 Acme Corp' },
+        { t: 'r', s: 'from dataclasses import dataclass' },
+        { t: 'r', s: 'from typing import Optional' },
+        { t: 'h', s: 'from db_pool import acquire_connection' },
+        { t: 'r', s: '' },
+        { t: 'r', s: '' },
+        { t: 'r', s: '@dataclass' },
+        { t: 'r', s: 'class AuthToken:' },
       ],
       cli: [
-        { t: 'c', s: '# read via CLI exec' },
-        { t: '$', s: "slipstream exec --files auth_service.py \\" },
-        { t: ' ', s: "  --ops '[{\"method\":\"file.read\",\"path\":\"auth_service.py\",\"start\":0,\"end\":8}]'" },
+        { t: 'c', s: '# read via CLI' },
+        { t: '$', s: "slipstream exec --files auth_service.py --read-all" },
         { t: '' },
-        { t: 'r', s: 'cursor: 8' },
-        { t: 'r', s: 'lines:' },
-        { t: 'h', s: '  0  "# Copyright 2026 Acme Corp"' },
-        { t: 'r', s: '  1  "from dataclasses import dataclass"' },
-        { t: 'r', s: '  2  "from typing import Optional"' },
-        { t: 'h', s: '  3  "from db_pool import acquire_connection"' },
-        { t: 'r', s: '  4  ""' },
-        { t: 'r', s: '  5  ""' },
-        { t: 'r', s: '  6  "@dataclass"' },
-        { t: 'r', s: '  7  "class AuthToken:"' },
+        { t: 'h', s: '@ auth_service.py (47L)' },
+        { t: 'r', s: '# Copyright 2026 Acme Corp' },
+        { t: 'r', s: 'from dataclasses import dataclass' },
+        { t: 'r', s: 'from typing import Optional' },
+        { t: 'h', s: 'from db_pool import acquire_connection' },
+        { t: 'r', s: '' },
+        { t: 'r', s: '' },
+        { t: 'r', s: '@dataclass' },
+        { t: 'r', s: 'class AuthToken:' },
+        { t: 'r', s: '...' },
+        { t: 'r', s: '[1f 0e closed]' },
+      ]
+    },
+    {
+      title: 'error handling',
+      mcp: [
+        { t: 'c', s: '# errors inline — no exception walls' },
+        { t: '>', s: 'ss(ops=[' },
+        { t: ' ', s: '  {"method":"file.str_replace","path":"main.rs",' },
+        { t: ' ', s: '   "old_str":"handle_request","new_str":"process_request"},' },
+        { t: ' ', s: '  {"method":"file.str_replace","path":"lib.rs",' },
+        { t: ' ', s: '   "old_str":"nonexistent_fn","new_str":"new_fn"}' },
+        { t: '>', s: '])' },
         { t: '' },
-        { t: 'r', s: 'close  status: closed' },
+        { t: 'h', s: '~ main.rs:42 str_replace (1 match)' },
+        { t: 'terr', s: '! lib.rs str_replace: old_str not found' },
+        { t: 'r', s: '[1f 1e flush:skip closed !1err]' },
+      ],
+      cli: [
+        { t: 'c', s: '# same error via CLI' },
+        { t: '$', s: "slipstream exec --files main.rs lib.rs \\" },
+        { t: ' ', s: "  --ops '[" },
+        { t: ' ', s: '    {"method":"file.str_replace","path":"main.rs",' },
+        { t: ' ', s: '     "old_str":"handle_request","new_str":"process_request"},' },
+        { t: ' ', s: '    {"method":"file.str_replace","path":"lib.rs",' },
+        { t: ' ', s: "     \"old_str\":\"nonexistent_fn\",\"new_str\":\"new_fn\"}]' \\" },
+        { t: ' ', s: "  --flush" },
+        { t: '' },
+        { t: 'h', s: '~ main.rs:42 str_replace (1 match)' },
+        { t: 'terr', s: '! lib.rs str_replace: old_str not found' },
+        { t: 'r', s: '[1f 1e flush:skip closed !1err]' },
       ]
     }
   ];
@@ -919,6 +922,7 @@
       case ' ':  return '  <span class="tc">' + esc(s) + '</span>';
       case 'r':  return '<span class="to">' + esc(s) + '</span>';
       case 'h':  return '<span class="ta">' + esc(s) + '</span>';
+      case 'terr': return '<span class="terr">' + esc(s) + '</span>';
       case '':   return '';
       default:   return esc(s);
     }
