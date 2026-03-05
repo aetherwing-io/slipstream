@@ -240,6 +240,13 @@ fn format_batch_array(batch: &Value, ops: Option<&Value>, lines: &mut Vec<String
             }
             desc.push(')');
             lines.push(desc);
+            // Inline diff: show old/new lines
+            if let (Some(old), Some(new)) = (
+                op.and_then(|o| o.get("old_str")).and_then(|s| s.as_str()),
+                op.and_then(|o| o.get("new_str")).and_then(|s| s.as_str()),
+            ) {
+                format_inline_diff(old, new, lines);
+            }
             bar.edits += 1;
         } else if result.get("lines").is_some() {
             // read result
@@ -336,6 +343,30 @@ pub fn format_rpc_error(code: i64, message: &str, data: Option<&Value>) -> Strin
     }
 
     lines.join("\n")
+}
+
+/// Format an inline diff showing old/new lines.
+/// For short edits (≤3 lines each), show all lines.
+/// For longer edits, show first 2 lines + "... (+N more)".
+fn format_inline_diff(old: &str, new: &str, lines: &mut Vec<String>) {
+    let old_lines: Vec<&str> = old.lines().collect();
+    let new_lines: Vec<&str> = new.lines().collect();
+    let max_show = 3;
+
+    for (i, line) in old_lines.iter().enumerate() {
+        if i >= max_show {
+            lines.push(format!("  - ... (+{} more)", old_lines.len() - max_show));
+            break;
+        }
+        lines.push(format!("  - {line}"));
+    }
+    for (i, line) in new_lines.iter().enumerate() {
+        if i >= max_show {
+            lines.push(format!("  + ... (+{} more)", new_lines.len() - max_show));
+            break;
+        }
+        lines.push(format!("  + {line}"));
+    }
 }
 
 /// Shorten a path for display — strip common prefixes, keep filename + parent.
