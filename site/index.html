@@ -160,18 +160,16 @@
 
   /* Animated terminal */
   .anim-term .term-body {
-    height: 340px;
+    min-height: 200px;
+    max-height: 400px;
     overflow-y: auto;
     overflow-x: hidden;
     position: relative;
     scrollbar-width: none;
+    padding: 0;
   }
   .anim-term .term-body::-webkit-scrollbar { display: none; }
   .anim-scroll {
-    min-height: 100%;
-    display: flex;
-    flex-direction: column;
-    justify-content: flex-end;
     padding: 24px;
   }
   .anim-cursor {
@@ -187,24 +185,45 @@
   @keyframes blink { 50% { opacity: 0; } }
 
   .anim-line { display: block; min-height: 1.7em; }
-  .anim-line.response { opacity: 0; transition: opacity 0.15s; }
-  .anim-line.response.visible { opacity: 1; }
+  .anim-line.response { opacity: 0; transform: translateY(4px); transition: opacity 0.25s ease, transform 0.25s ease; }
+  .anim-line.response.visible { opacity: 1; transform: translateY(0); }
+  .anim-line.anim-input { border-left: 2px solid rgba(14,165,168,0.3); padding-left: 12px; margin-left: -14px; }
+  .anim-line.anim-output { border-left: 2px solid rgba(56,189,248,0.2); padding-left: 12px; margin-left: -14px; }
+  .anim-line.anim-error { border-left: 2px solid rgba(239,68,68,0.4); padding-left: 12px; margin-left: -14px; }
+  .anim-line.anim-status { border-left: 2px solid rgba(85,85,106,0.3); padding-left: 12px; margin-left: -14px; }
   .anim-banner {
-    padding: 14px 24px;
+    padding: 16px 24px;
     font-family: var(--sans);
     font-size: 14px;
     font-weight: 300;
-    color: var(--text);
-    background: var(--surface);
+    color: var(--secondary);
+    background: linear-gradient(135deg, rgba(14,165,168,0.04) 0%, rgba(56,189,248,0.02) 100%);
     border-bottom: 1px solid var(--border);
-    line-height: 1.5;
-    min-height: 48px;
+    line-height: 1.6;
+    min-height: 52px;
     display: flex;
     align-items: center;
+    gap: 8px;
   }
   .anim-banner strong {
     color: var(--bright);
     font-weight: 500;
+  }
+  .anim-banner code {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 600;
+    min-width: 24px;
+    height: 24px;
+    padding: 0 6px;
+    border-radius: 5px;
+    background: var(--elevated);
+    border: 1px solid var(--border);
+    vertical-align: middle;
+    line-height: 1;
   }
   .anim-controls {
     display: flex;
@@ -563,7 +582,9 @@
     <p class="hero-desc">Three MCP tools that give your agent self-contained batch edits, persistent file sessions, and conflict-safe writes. One daemon. Zero dependencies.</p>
 
     <!-- Animated demo terminal -->
-    <div class="term anim-term" style="display:inline-block;text-align:left;max-width:720px;width:100%;margin:0 auto;">
+    <div class="anim-term-wrap" style="position:relative;display:inline-block;max-width:720px;width:100%;margin:0 auto;">
+      <div style="position:absolute;inset:-40px;background:radial-gradient(ellipse at 50% 30%, rgba(14,165,168,0.06) 0%, rgba(56,189,248,0.03) 40%, transparent 70%);pointer-events:none;z-index:0;border-radius:50%;filter:blur(30px);"></div>
+    <div class="term anim-term" style="position:relative;z-index:1;text-align:left;width:100%;">
       <div class="term-bar">
         <div class="td"></div><div class="td"></div><div class="td"></div>
         <div class="term-title" id="anim-title">slipstream in action</div>
@@ -577,6 +598,7 @@
         </div>
         <div class="anim-progress" id="anim-progress"></div>
       </div>
+    </div>
     </div>
 
     <div class="hero-cta">
@@ -936,6 +958,14 @@
     return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   }
 
+  function lineClass(t) {
+    if (t === '>' || t === '$' || t === ' ') return 'anim-input';
+    if (t === 'h') return 'anim-output';
+    if (t === 'terr') return 'anim-error';
+    if (t === 'r') return 'anim-status';
+    return '';
+  }
+
   function colorLine(line) {
     var t = line.t, s = line.s || '';
     switch(t) {
@@ -987,7 +1017,7 @@
       if (isTyped(line.t)) {
         var prompt = line.t === '>' ? '\u276f' : '$';
         var promptCls = 'tp';
-        var el = addLine('<span class="' + promptCls + '">' + prompt + '</span> <span class="tc"></span><span class="anim-cursor"></span>');
+        var el = addLine('<span class="' + promptCls + '">' + prompt + '</span> <span class="tc"></span><span class="anim-cursor"></span>', 'anim-input');
         var tcSpan = el.querySelector('.tc');
         var chars = line.s;
         var ci = 0;
@@ -1008,11 +1038,13 @@
         }
         timeouts.push(setTimeout(typeChar, 80));
       } else {
-        var el = addLine(colorLine(line), 'response');
+        var lc = lineClass(line.t);
+        var el = addLine(colorLine(line), 'response' + (lc ? ' ' + lc : ''));
         requestAnimationFrame(function() {
           requestAnimationFrame(function() { el.classList.add('visible'); });
         });
-        var d = line.t === '' ? 200 : (line.t === 'c' ? 600 : (line.t === 'h' || line.t === 'terr' ? 400 : 250));
+        // Blank lines = pause between input/output. Highlighted output gets extra dwell.
+        var d = line.t === '' ? 500 : (line.t === 'c' ? 700 : (line.t === 'h' || line.t === 'terr' ? 450 : 300));
         animTimeout = setTimeout(nextLine, d);
       }
     }
