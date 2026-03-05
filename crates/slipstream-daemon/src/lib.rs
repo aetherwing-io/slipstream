@@ -1,6 +1,7 @@
 pub mod coordinator;
 pub mod fcp_bridge;
 pub mod handler;
+pub mod plugin_manager;
 pub mod protocol;
 pub mod registry;
 pub mod types;
@@ -14,6 +15,7 @@ use tokio::sync::Semaphore;
 
 use crate::coordinator::Coordinator;
 use crate::fcp_bridge::{FcpBridge, FcpRegisterParams, FcpResponse};
+use crate::plugin_manager::PluginManager;
 use crate::registry::FormatRegistry;
 
 /// Maximum number of concurrent client connections.
@@ -86,6 +88,12 @@ pub async fn run_daemon(socket_path: Option<std::path::PathBuf>) {
     let registry = Arc::new(FormatRegistry::default_registry());
     let coordinator = Arc::new(Coordinator::new());
     let fcp_bridge = Arc::new(FcpBridge::new());
+    let plugin_mgr = Arc::new(PluginManager::new());
+
+    // Discover FCP plugins (sibling binaries, config, PATH)
+    if let Ok(exe) = std::env::current_exe() {
+        plugin_mgr.discover_all(&exe);
+    }
 
     // Spawn session sweeper (periodic cleanup of expired sessions)
     let sweep_mgr = Arc::clone(&mgr);
@@ -105,7 +113,7 @@ pub async fn run_daemon(socket_path: Option<std::path::PathBuf>) {
         }
     });
 
-    serve(listener, mgr, registry, coordinator, fcp_bridge).await;
+    serve(listener, mgr, registry, coordinator, fcp_bridge, plugin_mgr, socket_path).await;
 }
 
 /// Run the server accept loop. Spawns a task per connection.
@@ -116,6 +124,8 @@ pub async fn serve(
     registry: Arc<FormatRegistry>,
     coordinator: Arc<Coordinator>,
     fcp_bridge: Arc<FcpBridge>,
+    plugin_mgr: Arc<PluginManager>,
+    socket_path: std::path::PathBuf,
 ) {
     let conn_semaphore = Arc::new(Semaphore::new(MAX_CONNECTIONS));
 
@@ -160,9 +170,11 @@ pub async fn serve(
                 let registry = Arc::clone(&registry);
                 let coordinator = Arc::clone(&coordinator);
                 let fcp_bridge = Arc::clone(&fcp_bridge);
+                let plugin_mgr = Arc::clone(&plugin_mgr);
+                let socket_path = socket_path.clone();
                 tokio::spawn(async move {
                     if let Err(e) =
-                        handle_connection(stream, mgr, registry, coordinator, fcp_bridge).await
+                        handle_connection(stream, mgr, registry, coordinator, fcp_bridge, plugin_mgr, socket_path).await
                     {
                         tracing::warn!("connection error: {e}");
                     }
@@ -189,6 +201,8 @@ async fn handle_connection(
     registry: Arc<FormatRegistry>,
     coordinator: Arc<Coordinator>,
     fcp_bridge: Arc<FcpBridge>,
+    plugin_mgr: Arc<PluginManager>,
+    socket_path: std::path::PathBuf,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (reader, mut writer) = stream.into_split();
     let mut lines = BufReader::with_capacity(64 * 1024, reader).lines();
@@ -238,12 +252,13 @@ async fn handle_connection(
         let reg_clone = Arc::clone(&registry);
         let coord_clone = Arc::clone(&coordinator);
         let bridge_clone = Arc::clone(&fcp_bridge);
+        let plugin_clone = Arc::clone(&plugin_mgr);
 
         let dispatch_result = match serde_json::from_str::<protocol::Request>(&line) {
             Ok(req) => {
                 tracing::debug!("request: {} (id={:?})", req.method, req.id);
                 tokio::task::spawn_blocking(move || {
-                    handler::dispatch(req, &mgr_clone, &reg_clone, &coord_clone, &bridge_clone)
+                    handler::dispatch(req, &mgr_clone, &reg_clone, &coord_clone, &bridge_clone, &plugin_clone)
                 })
                 .await
                 .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?
@@ -258,7 +273,7 @@ async fn handle_connection(
             )),
         };
 
-        // Resolve dispatch result — may need async FCP routing
+        // Resolve dispatch result — may need async FCP routing or plugin spawn
         let response = match dispatch_result {
             handler::DispatchResult::Ready(resp) => resp,
             handler::DispatchResult::FcpRoute {
@@ -266,6 +281,13 @@ async fn handle_connection(
                 handler_name,
                 action,
             } => resolve_fcp_route(id, &handler_name, action, &fcp_bridge).await,
+            handler::DispatchResult::FcpSpawn {
+                id,
+                plugin_name,
+                action,
+            } => {
+                resolve_fcp_spawn(id, &plugin_name, action, &fcp_bridge, &plugin_mgr, &socket_path).await
+            }
         };
 
         resp_buf.clear();
@@ -329,6 +351,54 @@ async fn resolve_fcp_route(
             },
         ),
     }
+}
+
+/// Resolve an FcpSpawn — spawn the plugin, wait for registration, then route.
+async fn resolve_fcp_spawn(
+    id: Option<u64>,
+    plugin_name: &str,
+    action: handler::FcpRouteAction,
+    fcp_bridge: &Arc<FcpBridge>,
+    plugin_mgr: &Arc<PluginManager>,
+    socket_path: &std::path::Path,
+) -> protocol::Response {
+    // Skip if already live (race: another connection may have spawned it)
+    if !fcp_bridge.is_handler_live(plugin_name) {
+        // Spawn the plugin
+        if let Err(e) = plugin_mgr.spawn(plugin_name, socket_path).await {
+            tracing::warn!("plugin spawn failed: {e}");
+            return protocol::Response::err(
+                id,
+                protocol::RpcError {
+                    code: protocol::ERR_INTERNAL,
+                    message: format!("failed to spawn plugin {plugin_name}: {e}"),
+                    data: None,
+                },
+            );
+        }
+
+        // Wait for it to register
+        if !plugin_mgr.wait_for_registration(plugin_name, fcp_bridge).await {
+            plugin_mgr.mark_failed(plugin_name);
+            tracing::warn!("plugin {plugin_name} did not register within timeout");
+            return protocol::Response::err(
+                id,
+                protocol::RpcError {
+                    code: protocol::ERR_INTERNAL,
+                    message: format!(
+                        "plugin {plugin_name} did not register within {}s — text-mode fallback",
+                        plugin_manager::SPAWN_TIMEOUT.as_secs()
+                    ),
+                    data: None,
+                },
+            );
+        }
+
+        tracing::info!("plugin {plugin_name} registered successfully");
+    }
+
+    // Now route via the live handler
+    resolve_fcp_route(id, plugin_name, action, fcp_bridge).await
 }
 
 /// Handle an FCP handler connection (bidirectional message passing).

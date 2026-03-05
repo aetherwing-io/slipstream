@@ -156,6 +156,32 @@ enum Command {
 
     /// Start the MCP stdio server
     Mcp,
+
+    /// File Context Protocols — embedded domain tools (regex, rust, ...)
+    #[cfg(feature = "fcp-regex")]
+    Fcp {
+        #[command(subcommand)]
+        protocol: FcpProtocol,
+    },
+}
+
+#[cfg(feature = "fcp-regex")]
+#[derive(Subcommand)]
+enum FcpProtocol {
+    /// Build regexes via named fragment composition
+    Regex {
+        /// Mutation ops: "define digits any:digit+", "compile digits anchored:true"
+        ops: Vec<String>,
+    },
+
+    /// Read-only regex queries
+    RegexQuery {
+        /// Query string: "show digits", "test NAME against:STR", "list library"
+        q: String,
+    },
+
+    /// Show the FCP regex reference card
+    RegexHelp,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -206,14 +232,21 @@ async fn run(
                 .map_err(|e| ClientError::AutoStart(e.to_string()))?;
             return Ok(());
         }
+        #[cfg(feature = "fcp-regex")]
+        Command::Fcp { protocol } => {
+            run_fcp(protocol);
+            return Ok(());
+        }
         _ => {}
     }
 
     let mut client = Client::connect(socket_path, auto_start).await?;
 
     let result = match command {
-        // Daemon and Mcp handled above — unreachable here
+        // Daemon, Mcp (and Fcp when enabled) handled above — unreachable here
         Command::Daemon { .. } | Command::Mcp => unreachable!(),
+        #[cfg(feature = "fcp-regex")]
+        Command::Fcp { .. } => unreachable!(),
 
         Command::Open { files } => {
             let paths: Vec<&str> = files.iter()
@@ -311,7 +344,7 @@ async fn run(
         }
 
         Command::Agent => {
-            print!("{AGENT_REFERENCE}");
+            print!("{}", agent_reference());
             return Ok(());
         }
 
@@ -320,7 +353,12 @@ async fn run(
         }
     };
 
-    println!("{}", serde_json::to_string_pretty(&result).unwrap());
+    use slipstream_cli::format;
+    if format::is_fcp_passthrough(&result) {
+        println!("{}", format::format_fcp_passthrough(&result));
+    } else {
+        println!("{}", serde_json::to_string_pretty(&result).unwrap());
+    }
     Ok(())
 }
 
@@ -436,75 +474,188 @@ async fn run_exec(
     Ok(())
 }
 
-const AGENT_REFERENCE: &str = r#"# Slipstream — Agent Quick Reference
+// ---------------------------------------------------------------------------
+// File Context Protocols (FCP) — in-process, no daemon needed
+// ---------------------------------------------------------------------------
 
-IF YOU ARE AN LLM/AI AGENT, USE `exec` FOR EVERYTHING.
+#[cfg(feature = "fcp-regex")]
+fn run_fcp(protocol: FcpProtocol) {
+    match protocol {
+        FcpProtocol::Regex { ops } => {
+            let op_refs: Vec<&str> = ops.iter().map(|s| s.as_str()).collect();
+            let results = fcp_regex_core::execute_ops(&op_refs);
+            for result in &results {
+                println!("{result}");
+            }
+        }
+        FcpProtocol::RegexQuery { q } => {
+            // Create ephemeral registry for the query — stateless
+            let registry = fcp_regex_core::FragmentRegistry::new();
+            let result = fcp_regex_core::domain::query::handle_query(&q, &registry);
+            println!("{result}");
+        }
+        FcpProtocol::RegexHelp => {
+            print!("{FCP_REGEX_REFERENCE}");
+        }
+    }
+}
+
+#[cfg(feature = "fcp-regex")]
+const FCP_REGEX_REFERENCE: &str = r#"# File Context Protocols (FCP): regex
+
+Build regexes via named fragment composition. Runs in-process, no daemon needed.
+
+## Mutations — slipstream fcp regex "OP" ["OP" ...]
+
+  define NAME ELEMENT [ELEMENT...]      Create named pattern fragment
+  from SOURCE [as:ALIAS]               Import from 55-pattern library
+  compile NAME [flavor:F] [anchored:bool]  Emit regex string
+  drop NAME                            Remove fragment
+  rename OLD NEW                       Rename fragment
+
+## Elements
+
+  <name>        Reference another fragment
+  lit:<chars>   Literal (auto-escaped)    raw:<regex>  Raw regex
+  any:<C><Q>    Character class           none:<C><Q>  Negated class
+  chars:<S><Q>  Custom char set           not:<S><Q>   Negated set
+  opt:<name>    Optional fragment         alt:<a>|<b>  Alternation
+  cap:<name>    Capture group             sep:<N>/<L>  Separated repeat
+
+  Classes: digit alpha alphanumeric word whitespace any
+  Quantifiers: + * ? {N} {N,M} {N,}
+
+## Queries — slipstream fcp regex-query "QUERY"
+
+  show NAME              Fragment tree + compiled regex
+  test NAME against:STR  Test match
+  list                   All fragments
+  list library           Pattern library categories
+  get PATTERN            Library pattern detail
+
+## Examples
+
+  slipstream fcp regex "define digits any:digit+" "compile digits anchored:true"
+  slipstream fcp regex "from semver" "compile semver"
+  slipstream fcp regex "define d any:digit+" "define ver d lit:. d lit:. d" "compile ver"
+  slipstream fcp regex-query "list library"
+  slipstream fcp regex-query "get semver"
+
+## Response Prefixes: + created  * modified  - deleted  = result  ! error
+"#;
+
+fn agent_reference() -> String {
+    let mut sections = Vec::new();
+
+    // FCP header — only shown when at least one protocol is compiled in
+    #[allow(unused_mut)]
+    let mut fcp_protocols: Vec<&str> = Vec::new();
+    #[cfg(feature = "fcp-regex")]
+    fcp_protocols.push("regex");
+    // Future: #[cfg(feature = "fcp-rust")] fcp_protocols.push("rust");
+
+    if !fcp_protocols.is_empty() {
+        let names = fcp_protocols.join(", ");
+        sections.push(format!("## File Context Protocols (FCP): {names}\n"));
+    }
+
+    #[cfg(feature = "fcp-regex")]
+    sections.push(AGENT_FCP_REGEX.to_string());
+
+    sections.push("---\n".to_string());
+    sections.push(AGENT_FILE_EDITING.to_string());
+
+    format!("# Slipstream — Agent Quick Reference\n\n{}", sections.join("\n"))
+}
+
+#[cfg(feature = "fcp-regex")]
+const AGENT_FCP_REGEX: &str = r#"### regex — build regexes via named fragments (never write raw regex)
+
+    slipstream fcp regex "define NAME ELEMENT [ELEMENT...]"
+    slipstream fcp regex "from SOURCE [as:ALIAS]"
+    slipstream fcp regex "compile NAME [flavor:F] [anchored:bool]"
+    slipstream fcp regex-query "test NAME against:STR"
+    slipstream fcp regex-query "list library"
+    slipstream fcp regex-help
+
+  Elements: lit:<chars> any:<C><Q> none:<C><Q> chars:<S><Q> not:<S><Q>
+            opt:<name> alt:<a>|<b> cap:<name> sep:<N>/<L> raw:<regex>
+  Classes:  digit alpha alphanumeric word whitespace any
+  Quants:   + * ? {N} {N,M} {N,}
+  Library:  ~55 patterns (semver, ipv4, email, url, uuid, ...) — use `from` to import
+
+  Example: slipstream fcp regex "define d any:digit+" "define ver d lit:. d lit:. d" "compile ver anchored:true"
+  Result:  ^\d+\.\d+\.\d+$
+"#;
+
+const AGENT_FILE_EDITING: &str = r#"## File Editing — use `exec` for everything
+
 One command = open files + apply edits + flush + close.
 Files are auto-created if they don't exist.
 
-## Create a new file
+### Create a new file
 
     slipstream exec --files script.py --ops '[
       {"method":"file.write","path":"script.py","content":"x = 1\nprint(x)"}
     ]' --flush
 
-## Edit a file (str_replace)
+### Edit a file (str_replace)
 
     slipstream exec --files src/main.rs --ops '[
       {"method":"file.str_replace","path":"src/main.rs","old_str":"foo","new_str":"bar"}
     ]' --flush
 
-## Edit multiple files
+### Edit multiple files
 
     slipstream exec --files src/a.rs src/b.rs --ops '[
       {"method":"file.str_replace","path":"src/a.rs","old_str":"x","new_str":"y"},
       {"method":"file.str_replace","path":"src/b.rs","old_str":"x","new_str":"y"}
     ]' --flush
 
-## Read a file
+### Read a file
 
     slipstream exec --files src/main.rs --read-all
 
-## Read then edit
+### Read then edit
 
     slipstream exec --files src/main.rs --read-all --ops '[
       {"method":"file.str_replace","path":"src/main.rs","old_str":"old","new_str":"new"}
     ]' --flush
 
-## Write entire file (omit start/end to replace all content)
+### Write entire file (omit start/end to replace all content)
 
     slipstream exec --files f.rs --ops '[
       {"method":"file.write","path":"f.rs","content":"new entire content\nline 2"}
     ]' --flush
 
-## Insert lines (start==end inserts before that line)
+### Insert lines (start==end inserts before that line)
 
     slipstream exec --files f.rs --ops '[
       {"method":"file.write","path":"f.rs","start":0,"end":0,"content":["// new header"]}
     ]' --flush
 
-## Replace lines (start<end replaces that range)
+### Replace lines (start<end replaces that range)
 
     slipstream exec --files f.rs --ops '[
       {"method":"file.write","path":"f.rs","start":5,"end":8,"content":["new line 5","new line 6"]}
     ]' --flush
 
-## Replace all occurrences
+### Replace all occurrences
 
     Add "replace_all":true to a str_replace op.
 
-## file.write content format
+### file.write content format
     content can be a string ("line1\nline2") or array (["line1","line2"]).
     start/end are optional — omit both to replace the entire file.
 
-## Key flags
+### Key flags
     --files     Files to open (required, space-separated, auto-created)
     --ops       JSON array of operations (inline, @file, or @- for stdin)
     --read-all  Print file contents before applying ops
     --flush     Write changes to disk (without this, edits are discarded)
     --force     Override conflict detection on flush
 
-## Output
+### Output
     JSON object with open/read/batch/flush/close results.
     Exit 0 on success, 1 on error (error JSON on stderr).
 "#;
