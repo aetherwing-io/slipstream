@@ -15,7 +15,7 @@ thiserror = "2"
 slipstream-core = { path = "../slipstream-core" }
 slipstream-daemon = { path = "../slipstream-daemon" }
 slipstream-mcp = { path = "../slipstream-mcp" }
-fcp-regex-core = { path = "../../../fcp/fcp-regex/fcp-regex-core", optional = true }
+fcp-regex-core = { git = "https://github.com/aetherwing-io/fcp-regex.git", tag = "v0.1.1", optional = true }
 
 [features]
 default = ["fcp-regex"]

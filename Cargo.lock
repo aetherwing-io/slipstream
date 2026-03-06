@@ -278,6 +278,7 @@ checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
 [[package]]
 name = "fcp-regex-core"
 version = "0.1.0"
+source = "git+https://github.com/aetherwing-io/fcp-regex.git?tag=v0.1.1#930c31d23fa1d235b5e4d02664a346b33c45273f"
 dependencies = [
  "regex",
  "regex-syntax",
@@ -871,7 +872,7 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "slipstream-cli"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "clap",
  "fcp-regex-core",
@@ -887,7 +888,7 @@ dependencies = [
 
 [[package]]
 name = "slipstream-core"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "dashmap",
  "parking_lot",
@@ -900,7 +901,7 @@ dependencies = [
 
 [[package]]
 name = "slipstream-daemon"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "dashmap",
  "libc",
@@ -919,7 +920,7 @@ dependencies = [
 
 [[package]]
 name = "slipstream-mcp"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "rmcp",
  "schemars",
