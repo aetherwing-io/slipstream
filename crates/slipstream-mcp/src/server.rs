@@ -458,6 +458,17 @@ impl SlipstreamServer {
 }
 
 impl SlipstreamServer {
+    /// Send a raw request through the reconnect-aware path.
+    #[doc(hidden)]
+    pub async fn test_request(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, ClientError> {
+        let mut inner = self.inner.lock().await;
+        inner.request(method, params).await
+    }
+
     /// One-shot mode: open → read? → ops? → close (auto-flushes).
     /// Uses a deterministic name so the daemon can reuse/create as needed.
     async fn exec_one_shot(

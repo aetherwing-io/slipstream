@@ -438,6 +438,76 @@ async fn mcp_status_returns_all_fields() {
     let _ = std::fs::remove_file(&sock);
 }
 
+// --- Reconnect-on-error test ---
+
+/// Verify that SlipstreamServer reconnects after the daemon dies.
+/// Scenario: connect → request → kill daemon → start new daemon → request succeeds.
+#[tokio::test]
+async fn reconnect_after_daemon_death() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("reconnect.txt");
+    std::fs::write(&file, "hello\n").unwrap();
+
+    let sock = PathBuf::from(format!(
+        "/tmp/ss-mcp-reconnect-{}.sock",
+        &uuid::Uuid::new_v4().to_string()[..8]
+    ));
+    let _ = std::fs::remove_file(&sock);
+
+    // Start daemon A
+    let mgr_a = Arc::new(SessionManager::new());
+    let listener_a = UnixListener::bind(&sock).unwrap();
+    let registry_a = Arc::new(FormatRegistry::default_registry());
+    let coord_a = Arc::new(Coordinator::new());
+    let bridge_a = Arc::new(slipstream_daemon::fcp_bridge::FcpBridge::new());
+    let plugin_a = Arc::new(slipstream_daemon::plugin_manager::PluginManager::new());
+    let handle_a = tokio::spawn(slipstream_daemon::serve(
+        listener_a, mgr_a, registry_a, coord_a, bridge_a, plugin_a, sock.clone(),
+    ));
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+    // Create server with lazy connection (no auto_start — we manage daemons ourselves)
+    let server = SlipstreamServer::new(&sock, false);
+
+    // First request should succeed (lazy connect to daemon A)
+    let result = server
+        .test_request("session.open", serde_json::json!({
+            "files": [file.to_str().unwrap()],
+            "name": "test",
+        }))
+        .await;
+    assert!(result.is_ok(), "first request should succeed: {:?}", result.err());
+
+    // Kill daemon A
+    handle_a.abort();
+    let _ = handle_a.await;
+    let _ = std::fs::remove_file(&sock);
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+    // Start daemon B on the same socket
+    let mgr_b = Arc::new(SessionManager::new());
+    let listener_b = UnixListener::bind(&sock).unwrap();
+    let registry_b = Arc::new(FormatRegistry::default_registry());
+    let coord_b = Arc::new(Coordinator::new());
+    let bridge_b = Arc::new(slipstream_daemon::fcp_bridge::FcpBridge::new());
+    let plugin_b = Arc::new(slipstream_daemon::plugin_manager::PluginManager::new());
+    tokio::spawn(slipstream_daemon::serve(
+        listener_b, mgr_b, registry_b, coord_b, bridge_b, plugin_b, sock.clone(),
+    ));
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+    // Second request: should detect dead connection, reconnect to daemon B, and succeed
+    let result = server
+        .test_request("session.open", serde_json::json!({
+            "files": [file.to_str().unwrap()],
+            "name": "test2",
+        }))
+        .await;
+    assert!(result.is_ok(), "reconnect request should succeed: {:?}", result.err());
+
+    let _ = std::fs::remove_file(&sock);
+}
+
 // --- Quick mode file creation tests ---
 
 /// ss(path, new_str) on a nonexistent file → creates it on disk.
