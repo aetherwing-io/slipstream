@@ -416,6 +416,20 @@ async fn run_exec(
         .collect();
     let open_result = client.request("session.open", serde_json::json!({ "files": paths })).await?;
 
+    // Check for FCP passthrough — file is managed by an external handler
+    use slipstream_cli::format;
+    if format::is_fcp_passthrough(&open_result) {
+        println!("{}", format::format_fcp_passthrough(&open_result));
+        return Ok(());
+    }
+
+    // Check for external handler array (registry Full handlers)
+    if open_result.is_array() {
+        let text = serde_json::to_string_pretty(&open_result).unwrap_or_default();
+        println!("{text}");
+        return Ok(());
+    }
+
     let session_id = open_result["session_id"]
         .as_str()
         .ok_or_else(|| ClientError::Rpc {
@@ -500,7 +514,6 @@ async fn run_exec(
     output.insert("close".to_string(), close_result);
 
     // Compact domain output
-    use slipstream_cli::format;
     let text = format::format_one_shot(
         &serde_json::Value::Object(output),
         saved_ops.as_ref(),

@@ -366,10 +366,27 @@ pub fn format_rpc_error(code: i64, message: &str, data: Option<&Value>) -> Strin
             lines.push(format!("! {short} flush: conflict lines [{ranges}] by session \"{by}\""));
         }
     } else {
-        lines.push(format!("! error {code}: {message}"));
+        let simplified = simplify_error_message(message);
+        lines.push(format!("! error {code}: {simplified}"));
     }
 
     lines.join("\n")
+}
+
+/// Simplify verbose nested error messages into user-friendly text.
+fn simplify_error_message(message: &str) -> &str {
+    // "session error: buffer error: I/O error: No such file or directory (os error 2)"
+    if message.contains("No such file or directory") {
+        return "file not found";
+    }
+    // Strip known nested prefixes to expose the leaf error
+    if let Some(leaf) = message.strip_prefix("session error: buffer error: ") {
+        return leaf;
+    }
+    if let Some(leaf) = message.strip_prefix("session error: ") {
+        return leaf;
+    }
+    message
 }
 
 /// Format an inline diff showing old/new lines.
@@ -556,6 +573,36 @@ mod tests {
         let out = format_fcp_passthrough(&fcp);
         assert!(out.contains("\"success\": true"), "got: {out}");
         assert!(!out.contains("fcp_passthrough"), "should strip marker, got: {out}");
+    }
+
+    #[test]
+    fn test_simplify_error_file_not_found() {
+        let msg = "session error: buffer error: I/O error: No such file or directory (os error 2)";
+        assert_eq!(simplify_error_message(msg), "file not found");
+    }
+
+    #[test]
+    fn test_simplify_error_strips_session_buffer_prefix() {
+        let msg = "session error: buffer error: something else went wrong";
+        assert_eq!(simplify_error_message(msg), "something else went wrong");
+    }
+
+    #[test]
+    fn test_simplify_error_strips_session_prefix() {
+        let msg = "session error: unknown session";
+        assert_eq!(simplify_error_message(msg), "unknown session");
+    }
+
+    #[test]
+    fn test_simplify_error_passthrough_unknown() {
+        let msg = "some other error";
+        assert_eq!(simplify_error_message(msg), "some other error");
+    }
+
+    #[test]
+    fn test_format_rpc_error_simplified() {
+        let out = format_rpc_error(-32603, "session error: buffer error: I/O error: No such file or directory (os error 2)", None);
+        assert_eq!(out, "! error -32603: file not found");
     }
 
     #[test]

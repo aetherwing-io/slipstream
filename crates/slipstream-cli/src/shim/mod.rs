@@ -7,20 +7,19 @@ mod tail;
 /// Dispatch a shim command by binary name.
 /// Returns the process exit code (0 = success).
 pub fn dispatch(binary_name: &str, args: &[String]) -> i32 {
-    // sed -i → write category interstitial, then passthrough to real sed.
-    // In-place edits need full GNU sed semantics (regex, atomicity, backup
-    // suffixes). The shim does literal string matching which silently
-    // differs for regex patterns used by build scripts and test runners.
+    // sed -i → passthrough to real sed (no interstitial).
+    // In-place edits need full GNU sed semantics; the shim can't help here.
     if binary_name == "sed" && is_sed_inplace(args) {
-        if common::shim_interstitial(binary_name, "write") {
-            return 2;
-        }
         common::fallback_exec(binary_name, args);
     }
 
     // Read category: cat, head, tail, sed -n (print range)
-    if common::shim_interstitial(binary_name, "read") {
-        return 2;
+    // Skip interstitial when stdin is piped — interstitials are for direct LLM invocations
+    let stdin_is_tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
+    if stdin_is_tty {
+        if common::shim_interstitial(binary_name, "read") {
+            return 2;
+        }
     }
 
     match binary_name {

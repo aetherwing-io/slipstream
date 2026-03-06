@@ -178,6 +178,7 @@ where
                 fallback_exec(binary_name, args)
             }
         }
+        Err(ShimError::Io(e)) if e.kind() == std::io::ErrorKind::BrokenPipe => 0,
         Err(ShimError::Io(e)) => {
             eprintln!("{binary_name}: {e}");
             1
