@@ -176,10 +176,15 @@ pub(super) fn fallback_exec(binary_name: &str, args: &[String]) -> ! {
 }
 
 /// Find the real binary by checking SLIPSTREAM_SHIM_FALLBACK_DIR, then common locations.
+/// Skips any candidate that resolves (via symlink) back to the current executable.
 fn find_real_binary(binary_name: &str) -> Option<PathBuf> {
+    let my_exe = std::env::current_exe()
+        .ok()
+        .and_then(|p| std::fs::canonicalize(p).ok());
+
     if let Ok(dir) = std::env::var("SLIPSTREAM_SHIM_FALLBACK_DIR") {
         let p = PathBuf::from(&dir).join(binary_name);
-        if p.exists() {
+        if is_real_binary(&p, &my_exe) {
             return Some(p);
         }
     }
@@ -187,12 +192,27 @@ fn find_real_binary(binary_name: &str) -> Option<PathBuf> {
     let search_dirs = ["/usr/bin", "/bin", "/usr/local/bin"];
     for dir in &search_dirs {
         let p = PathBuf::from(dir).join(binary_name);
-        if p.exists() {
+        if is_real_binary(&p, &my_exe) {
             return Some(p);
         }
     }
 
     None
+}
+
+/// Returns true if `path` exists and does not resolve to the same binary as `my_exe`.
+fn is_real_binary(path: &Path, my_exe: &Option<PathBuf>) -> bool {
+    if !path.exists() {
+        return false;
+    }
+    if let Some(ref me) = my_exe {
+        if let Ok(resolved) = std::fs::canonicalize(path) {
+            if &resolved == me {
+                return false; // symlink to self
+            }
+        }
+    }
+    true
 }
 
 fn no_fallback() -> bool {
@@ -229,5 +249,55 @@ impl From<ClientError> for ShimError {
 impl From<std::io::Error> for ShimError {
     fn from(e: std::io::Error) -> Self {
         ShimError::Io(e)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn is_real_binary_returns_false_for_nonexistent() {
+        let p = PathBuf::from("/tmp/slipstream_test_nonexistent_binary_xyz");
+        assert!(!is_real_binary(&p, &None));
+    }
+
+    #[test]
+    fn is_real_binary_returns_true_for_real_binary() {
+        // /usr/bin/true exists on all unix systems
+        let p = PathBuf::from("/usr/bin/true");
+        if p.exists() {
+            let fake_exe = Some(PathBuf::from("/usr/bin/false"));
+            assert!(is_real_binary(&p, &fake_exe));
+        }
+    }
+
+    #[test]
+    fn is_real_binary_returns_false_for_symlink_to_self() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("real_bin");
+        std::fs::write(&target, "#!/bin/sh\n").unwrap();
+
+        let link = dir.path().join("link_bin");
+        symlink(&target, &link).unwrap();
+
+        let canonical_target = std::fs::canonicalize(&target).unwrap();
+        assert!(!is_real_binary(&link, &Some(canonical_target)));
+    }
+
+    #[test]
+    fn is_real_binary_returns_true_for_symlink_to_different_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let target_a = dir.path().join("bin_a");
+        let target_b = dir.path().join("bin_b");
+        std::fs::write(&target_a, "a").unwrap();
+        std::fs::write(&target_b, "b").unwrap();
+
+        let link = dir.path().join("link_to_a");
+        symlink(&target_a, &link).unwrap();
+
+        let canonical_b = std::fs::canonicalize(&target_b).unwrap();
+        assert!(is_real_binary(&link, &Some(canonical_b)));
     }
 }

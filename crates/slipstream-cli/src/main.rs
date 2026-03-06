@@ -610,8 +610,8 @@ const AGENT_WHY: &str = r#"## When to use slipstream vs cat/sed/head/tail
 
 **If the slipstream shim is installed** (cat/head/tail/sed symlinked to
 slipstream), those commands are safe to use. Pipes, redirects, and
-subshell captures pass through to the real binary with byte-identical
-output. `sed -i` always uses real sed for full GNU regex semantics.
+subshell captures produce byte-identical output via the daemon.
+`sed -i` always uses real sed for full GNU regex semantics.
 
 **Use `slipstream exec` when you want these advantages:**
 - **Batch edits** — multiple files in one call (fewer round trips)

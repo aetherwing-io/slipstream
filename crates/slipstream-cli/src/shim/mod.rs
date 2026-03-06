@@ -4,19 +4,10 @@ mod head;
 mod sed;
 mod tail;
 
-use std::io::IsTerminal;
-
 /// Dispatch a shim command by binary name.
 /// Returns the process exit code (0 = success).
 pub fn dispatch(binary_name: &str, args: &[String]) -> i32 {
-    // Rule 1: non-TTY stdout → passthrough to real binary.
-    // Slipstream's output is for human terminals; pipes, redirects, and
-    // subshell captures must get byte-identical output from the real tool.
-    if should_passthrough_non_tty() {
-        common::fallback_exec(binary_name, args);
-    }
-
-    // Rule 2: sed -i → passthrough to real sed.
+    // sed -i → passthrough to real sed.
     // In-place edits need full GNU sed semantics (regex, atomicity, backup
     // suffixes). The shim does literal string matching which silently
     // differs for regex patterns used by build scripts and test runners.
@@ -34,11 +25,6 @@ pub fn dispatch(binary_name: &str, args: &[String]) -> i32 {
             2
         }
     }
-}
-
-/// Returns true when stdout is not a terminal (pipe, redirect, capture).
-fn should_passthrough_non_tty() -> bool {
-    !std::io::stdout().is_terminal()
 }
 
 /// Returns true when args contain -i or -i<suffix> (sed in-place mode).

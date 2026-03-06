@@ -105,7 +105,7 @@ fn platform_sed_i_args(args: &[&str]) -> Vec<String> {
 }
 
 /// Run shim sed -i (mutates file, no stdout to compare).
-/// With non-TTY passthrough, this execs real sed — args must be platform-correct.
+/// sed -i passthrough execs real sed — args must be platform-correct.
 fn shim_sed_i(socket: &Path, args: &[&str]) {
     let bin = slipstream_bin();
     let link_dir = std::env::temp_dir().join(format!("slipstream-shim-test-{}", std::process::id()));
@@ -554,6 +554,39 @@ fn shim_vs_native() {
     let (s, _) = shim(&socket, "cat", &["-n", no_nl_p]);
     let r = real("cat", &["-n", no_nl_p]);
     check!("cat -n no-trailing-newline", s, r);
+
+    // ── Non-TTY routes through daemon (not fallback) ──
+    // stdout is a pipe (Command::output()), SLIPSTREAM_SHIM_NO_FALLBACK=1
+    // disables fallback, and no SLIPSTREAM_SHIM_FALLBACK_DIR is set.
+    // If the shim still returns correct output, it must have gone through the daemon.
+
+    {
+        let bin = slipstream_bin();
+        let link_dir = std::env::temp_dir().join(format!("slipstream-shim-nofb-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&link_dir);
+        let link_path = link_dir.join("cat");
+        let _ = std::fs::remove_file(&link_path);
+        std::os::unix::fs::symlink(&bin, &link_path).unwrap();
+
+        let out = Command::new(&link_path)
+            .args(&[fp])
+            .env("SLIPSTREAM_SOCKET", &socket)
+            .env("SLIPSTREAM_SHIM_NO_FALLBACK", "1")
+            .env_remove("SLIPSTREAM_SHIM_FALLBACK_DIR")
+            .output()
+            .unwrap();
+
+        let _ = std::fs::remove_file(&link_path);
+
+        let s = String::from_utf8_lossy(&out.stdout).to_string();
+        let r = real("cat", &[fp]);
+        check!("cat piped (daemon, no fallback)", s, r);
+        check_eq!(
+            "cat piped exit code (daemon, no fallback)",
+            out.status.code().unwrap_or(-1),
+            0
+        );
+    }
 
     // ── Summary ──
 
