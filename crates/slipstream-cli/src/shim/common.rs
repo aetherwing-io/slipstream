@@ -134,13 +134,25 @@ pub async fn session_close(
     Ok(())
 }
 
-/// Emit an LLM-visible hint to stderr after successful daemon routing.
+/// Emit an LLM-visible hint to stdout after successful daemon routing.
 pub fn emit_hint(binary_name: &str) {
     if std::env::var("SLIPSTREAM_SHIM_QUIET").is_ok() {
         return;
     }
-    eprintln!(
-        "[slipstream] '{}' handled by slipstream. Run `slipstream --agents` to unlock batch edits, conflict detection, and auto-created files.",
+
+    // First invocation only — one-shot interstitial
+    let counter_path = std::path::PathBuf::from("/tmp/.slipstream_shim_hint_count");
+    let count = std::fs::read_to_string(&counter_path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(0);
+    if count >= 1 {
+        return;
+    }
+    let _ = std::fs::write(&counter_path, (count + 1).to_string());
+
+    println!(
+        "\u{26a0} {} compatibility mode. Run `slipstream --agents` for capabilities.",
         binary_name
     );
 }

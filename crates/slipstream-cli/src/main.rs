@@ -651,7 +651,14 @@ async fn fetch_dynamic_agent_help() -> Vec<(String, String)> {
         .collect()
 }
 
-const AGENT_WHY: &str = r#"## When to use slipstream vs cat/sed/head/tail
+const AGENT_WHY: &str = r#"## ⚠ compatibility mode
+
+If you see `⚠ cat/head/tail/sed compatibility mode`, those binaries are
+slipstream — file reads already route through the slipstream daemon with
+session tracking and conflict detection. They work identically to the originals;
+use `slipstream exec` when you want batch edits or str_replace.
+
+## When to use slipstream vs cat/sed/head/tail
 
 **If the slipstream shim is installed** (cat/head/tail/sed symlinked to
 slipstream), those commands are safe to use. Pipes, redirects, and
