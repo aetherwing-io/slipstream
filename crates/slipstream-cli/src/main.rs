@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 use slipstream_cli::client::{self, Client, ClientError};
+use slipstream_core::{resolve_ops_paths};
 
 #[derive(Parser)]
 #[command(name = "slipstream", about = "CLI client for the Slipstream editing daemon")]
@@ -290,6 +291,7 @@ async fn run(
         Command::Fcp { .. } => unreachable!(),
 
         Command::Open { files } => {
+            let files: Vec<PathBuf> = files.into_iter().map(|f| resolve_file(&f)).collect();
             let paths: Vec<&str> = files.iter()
                 .filter_map(|p| p.to_str())
                 .collect();
@@ -297,6 +299,7 @@ async fn run(
         }
 
         Command::Read { session, path, lines, count } => {
+            let path = resolve_file(&path);
             let (session_id, auto_opened) = match session {
                 Some(s) => (s, false),
                 None => {
@@ -337,6 +340,7 @@ async fn run(
         }
 
         Command::Write { session, path, start, end, content, stdin } => {
+            let path = resolve_file(&path);
             let lines = if stdin {
                 read_stdin_lines()
             } else {
@@ -352,6 +356,7 @@ async fn run(
         }
 
         Command::Cursor { session, path, to } => {
+            let path = resolve_file(&path);
             client.request("cursor.move", serde_json::json!({
                 "session_id": session,
                 "path": path,
@@ -377,7 +382,8 @@ async fn run(
         }
 
         Command::Batch { session, ops } => {
-            let ops_value = parse_ops(&ops)?;
+            let mut ops_value = parse_ops(&ops)?;
+            resolve_ops_paths(&mut ops_value);
             client.request("batch", serde_json::json!({
                 "session_id": session,
                 "ops": ops_value,
@@ -410,7 +416,8 @@ async fn run_exec(
 ) -> Result<(), ClientError> {
     let mut output = serde_json::Map::new();
 
-    // 1. Open session with files
+    // 1. Open session with files (resolve relative paths to absolute)
+    let files: Vec<PathBuf> = files.into_iter().map(|f| resolve_file(&f)).collect();
     let paths: Vec<&str> = files.iter()
         .filter_map(|p| p.to_str())
         .collect();
@@ -468,7 +475,8 @@ async fn run_exec(
     // 3. Apply ops if provided
     let mut saved_ops: Option<serde_json::Value> = None;
     if let Some(ops_str) = ops {
-        let ops_value = parse_ops(&ops_str)?;
+        let mut ops_value = parse_ops(&ops_str)?;
+        resolve_ops_paths(&mut ops_value);
         saved_ops = Some(ops_value.clone());
         if no_batch {
             let ops_array = ops_value.as_array().ok_or_else(|| ClientError::Rpc {
@@ -788,6 +796,15 @@ Files are auto-created if they don't exist.
     JSON object with open/read/batch/flush/close results.
     Exit 0 on success, 1 on error (error JSON on stderr).
 "#;
+
+/// Resolve a PathBuf to absolute using the current working directory.
+fn resolve_file(p: &PathBuf) -> PathBuf {
+    if p.is_absolute() {
+        p.clone()
+    } else {
+        std::env::current_dir().map(|cwd| cwd.join(p)).unwrap_or_else(|_| p.clone())
+    }
+}
 
 fn read_stdin_lines() -> Vec<String> {
     use std::io::BufRead;

@@ -14,6 +14,7 @@ use tokio::sync::Mutex;
 use slipstream_core::client::{Client, ClientError};
 use slipstream_core::format;
 use slipstream_core::parse::{self, SessionAction};
+use slipstream_core::{resolve_path, resolve_ops_paths};
 
 use crate::params::*;
 
@@ -236,7 +237,8 @@ impl SlipstreamServer {
         Parameters(p): Parameters<SsParams>,
     ) -> Result<CallToolResult, McpError> {
         // Quick mode: path provided
-        if let Some(ref path) = p.path {
+        if let Some(ref raw_path) = p.path {
+            let path = resolve_path(raw_path);
             let (ops, files) = match (&p.old_str, &p.new_str) {
                 // Edit: old_str + new_str → str_replace
                 (Some(old_str), Some(new_str)) => {
@@ -281,10 +283,11 @@ impl SlipstreamServer {
 
         // Batch mode: ops array
         if let Some(ref items) = p.ops {
-            let json_ops = match parse_ops(items) {
+            let mut json_ops = match parse_ops(items) {
                 Ok(ops) => ops,
                 Err(msg) => return err_result(msg),
             };
+            resolve_ops_paths(&mut json_ops);
 
             // If an explicit session is given, use session mode
             if let Some(ref session_name) = p.session {
@@ -317,6 +320,7 @@ impl SlipstreamServer {
 
         match action {
             SessionAction::Open { files, name } => {
+                let files: Vec<String> = files.iter().map(|f| resolve_path(f)).collect();
                 let session_name = name.unwrap_or_else(|| "default".to_string());
                 match inner.request("session.open", serde_json::json!({
                     "files": files,
@@ -366,6 +370,7 @@ impl SlipstreamServer {
                 }
             }
             SessionAction::Register { path, handler } => {
+                let path = resolve_path(&path);
                 match inner.request("coordinator.register", serde_json::json!({
                     "path": path,
                     "handler": handler,
@@ -390,6 +395,7 @@ impl SlipstreamServer {
                 }
             }
             SessionAction::Read { path, session, start, end, count } => {
+                let path = resolve_path(&path);
                 let session_name = session.as_deref().unwrap_or("default");
 
                 // Auto-open: tell daemon to open with this session name.
