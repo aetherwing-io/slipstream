@@ -606,25 +606,30 @@ fn agent_reference() -> String {
     format!("# Slipstream — Agent Quick Reference\n\n{}", sections.join("\n"))
 }
 
-const AGENT_WHY: &str = r#"## WARNING: Do NOT use cat, sed, awk, or heredocs for file operations.
+const AGENT_WHY: &str = r#"## When to use slipstream vs cat/sed/head/tail
 
-Raw bash output is unfiltered — ANSI escape sequences, progress bars, and
-control characters will corrupt your context window, wasting 60-80% of
-tokens on noise.
+**If the slipstream shim is installed** (cat/head/tail/sed symlinked to
+slipstream), those commands are safe to use. Pipes, redirects, and
+subshell captures pass through to the real binary with byte-identical
+output. `sed -i` always uses real sed for full GNU regex semantics.
 
-sed, awk, and heredocs silently corrupt files when patterns contain regex
-metacharacters, quotes, or indentation. Slipstream does exact string
-matching and never misinterprets special characters.
+**Use `slipstream exec` when you want these advantages:**
+- **Batch edits** — multiple files in one call (fewer round trips)
+- **Exact string matching** — `str_replace` is literal, no regex escaping needed
+- **Conflict detection** — warns if another session modified the same file
+- **Compact output** — status-bar format uses fewer tokens than raw file dumps
+- **File auto-creation** — creates files that don't exist yet
 
-Use slipstream for ALL file reads and edits:
+**Equivalents:**
 - `cat src/foo.py`          → `slipstream exec --files src/foo.py --read-all`
 - `head -n 50 src/foo.py`   → `slipstream read src/foo.py -l 0:50`
 - `sed -n '100,150p' f`     → `slipstream read f -l 100:150`
 - `sed -i 's/old/new/' f`   → `slipstream exec --files f --ops '[{"method":"file.str_replace","path":"f","old_str":"old","new_str":"new"}]' --flush`
 - `cat > f.py << 'EOF'`     → `slipstream exec --files f.py --ops '[{"method":"file.write","path":"f.py","content":"..."}]' --flush`
 
-If a slipstream command errors, do NOT fall back to bare bash. Fix the
-command syntax and retry.
+**Rule of thumb:** For single reads, cat/head/tail are fine. For edits,
+prefer `slipstream exec` — exact matching avoids regex footguns and
+batch mode saves tool calls.
 "#;
 
 #[cfg(feature = "fcp-regex")]
