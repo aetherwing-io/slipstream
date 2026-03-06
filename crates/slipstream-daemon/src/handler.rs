@@ -182,6 +182,7 @@ pub fn dispatch(
         "coordinator.register" => handle_coordinator_register(req, coordinator),
         "coordinator.unregister" => handle_coordinator_unregister(req, coordinator),
         "coordinator.check" => handle_coordinator_check(req, coordinator),
+        "fcp.agent_help" => handle_fcp_agent_help(req, fcp_bridge),
         _ => Response::err(
             req.id,
             RpcError {
@@ -1102,6 +1103,20 @@ fn match_manager_error(
     }
 }
 
+fn handle_fcp_agent_help(req: Request, fcp_bridge: &Arc<FcpBridge>) -> Response {
+    let help_entries = fcp_bridge.list_agent_help();
+    let entries: Vec<serde_json::Value> = help_entries
+        .into_iter()
+        .map(|(name, text)| {
+            serde_json::json!({
+                "handler_name": name,
+                "agent_help": text,
+            })
+        })
+        .collect();
+    Response::ok(req.id, serde_json::json!({ "entries": entries }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2013,6 +2028,7 @@ mod tests {
             handler_name: "sheets".to_string(),
             extensions: vec!["xlsx".to_string()],
             capabilities: crate::fcp_bridge::FcpCapabilities::default(),
+            agent_help: None,
         });
 
         let req = make_request(
@@ -2068,6 +2084,7 @@ mod tests {
             handler_name: "sheets".to_string(),
             extensions: vec!["xlsx".to_string()],
             capabilities: crate::fcp_bridge::FcpCapabilities::default(),
+            agent_help: None,
         });
 
         let req = make_request(
@@ -2092,6 +2109,7 @@ mod tests {
             handler_name: "sheets".to_string(),
             extensions: vec!["xlsx".to_string()],
             capabilities: crate::fcp_bridge::FcpCapabilities::default(),
+            agent_help: None,
         });
 
         let req = make_request(

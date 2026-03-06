@@ -214,7 +214,7 @@ async fn async_main() {
     let cli = Cli::parse();
 
     if cli.agents {
-        print!("{}", agent_reference());
+        print!("{}", agent_reference().await);
         return;
     }
 
@@ -580,17 +580,28 @@ Build regexes via named fragment composition. Runs in-process, no daemon needed.
 ## Response Prefixes: + created  * modified  - deleted  = result  ! error
 "#;
 
-fn agent_reference() -> String {
+async fn agent_reference() -> String {
     let mut sections = Vec::new();
 
     sections.push(AGENT_WHY.to_string());
 
-    // FCP header — only shown when at least one protocol is compiled in
+    // FCP header — only shown when at least one protocol is compiled in or registered at runtime
     #[allow(unused_mut)]
     let mut fcp_protocols: Vec<&str> = Vec::new();
     #[cfg(feature = "fcp-regex")]
     fcp_protocols.push("regex");
-    // Future: #[cfg(feature = "fcp-rust")] fcp_protocols.push("rust");
+
+    // Query daemon for dynamic FCP plugin help (best-effort, silent on failure)
+    let dynamic_help = fetch_dynamic_agent_help().await;
+    if !dynamic_help.is_empty() {
+        for (name, _) in &dynamic_help {
+            // Strip "fcp-" prefix for display
+            let short = name.strip_prefix("fcp-").unwrap_or(name);
+            if !fcp_protocols.iter().any(|p| *p == short) {
+                fcp_protocols.push(Box::leak(short.to_string().into_boxed_str()));
+            }
+        }
+    }
 
     if !fcp_protocols.is_empty() {
         let names = fcp_protocols.join(", ");
@@ -600,10 +611,44 @@ fn agent_reference() -> String {
     #[cfg(feature = "fcp-regex")]
     sections.push(AGENT_FCP_REGEX.to_string());
 
+    // Append dynamic plugin help sections
+    for (_, help_text) in &dynamic_help {
+        sections.push(help_text.clone());
+    }
+
     sections.push("---\n".to_string());
     sections.push(AGENT_FILE_EDITING.to_string());
 
     format!("# Slipstream — Agent Quick Reference\n\nYOU NOW HAVE SESSION-AWARE FILE EDITING WITH CONFLICT DETECTION.\n\nWithout slipstream, file edits are blind writes with no safety net.\nWith slipstream, edits are tracked, batched, and conflict-checked:\n\n- Batch edits — multiple files in one call, fewer round trips, fewer tokens\n- Conflict detection — warns if another session modified the same file\n- Exact string matching — literal str_replace, no regex escaping needed\n- Auto-created files — write to files that don't exist yet\n- Compact output — status-bar format uses fewer tokens than raw file dumps\n\n{}", sections.join("\n"))
+}
+
+/// Query the daemon for agent help text from live FCP plugins.
+/// Returns empty vec on any failure (daemon not running, etc.)
+async fn fetch_dynamic_agent_help() -> Vec<(String, String)> {
+    let socket_path = client::default_socket_path();
+    let mut client = match client::Client::connect(&socket_path, false).await {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let result = match client
+        .request("fcp.agent_help", serde_json::json!({}))
+        .await
+    {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    let entries = match result.get("entries").and_then(|e| e.as_array()) {
+        Some(arr) => arr,
+        None => return Vec::new(),
+    };
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let name = entry.get("handler_name")?.as_str()?;
+            let help = entry.get("agent_help")?.as_str()?;
+            Some((name.to_string(), help.to_string()))
+        })
+        .collect()
 }
 
 const AGENT_WHY: &str = r#"## When to use slipstream vs cat/sed/head/tail

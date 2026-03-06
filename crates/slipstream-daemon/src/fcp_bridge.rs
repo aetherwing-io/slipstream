@@ -46,6 +46,10 @@ pub struct FcpRegisterParams {
     pub extensions: Vec<String>,
     #[serde(default)]
     pub capabilities: FcpCapabilities,
+    /// Optional agent help text shown in `slipstream --agents`.
+    /// Markdown format, typically a `### name — description` section.
+    #[serde(default)]
+    pub agent_help: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -75,6 +79,7 @@ pub struct FcpHandlerConnection {
     pub handler_name: String,
     pub extensions: Vec<String>,
     pub capabilities: FcpCapabilities,
+    pub agent_help: Option<String>,
     pub request_tx: mpsc::Sender<(FcpRequest, oneshot::Sender<FcpResponse>)>,
     pub registered_at: Instant,
 }
@@ -124,6 +129,7 @@ impl FcpBridge {
                 handler_name: params.handler_name,
                 extensions: params.extensions,
                 capabilities: params.capabilities,
+                agent_help: params.agent_help,
                 request_tx: tx,
                 registered_at: Instant::now(),
             },
@@ -152,6 +158,20 @@ impl FcpBridge {
     /// Check if a handler is live by name.
     pub fn is_handler_live(&self, handler_name: &str) -> bool {
         self.handlers.contains_key(handler_name)
+    }
+
+    /// Return agent help text from all live handlers that provided it.
+    /// Returns vec of (handler_name, help_text).
+    pub fn list_agent_help(&self) -> Vec<(String, String)> {
+        self.handlers
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .agent_help
+                    .as_ref()
+                    .map(|h| (entry.handler_name.clone(), h.clone()))
+            })
+            .collect()
     }
 
     /// Get the extensions registered for a handler.
@@ -267,6 +287,7 @@ mod tests {
             handler_name: "sheets".to_string(),
             extensions: vec!["xlsx".to_string(), "xls".to_string()],
             capabilities: FcpCapabilities::default(),
+            agent_help: None,
         });
 
         assert_eq!(bridge.lookup_live("xlsx"), Some("sheets".to_string()));
@@ -283,6 +304,7 @@ mod tests {
             handler_name: "midi".to_string(),
             extensions: vec!["mid".to_string(), "midi".to_string()],
             capabilities: FcpCapabilities::default(),
+            agent_help: None,
         });
 
         assert!(bridge.lookup_live("mid").is_some());
@@ -299,11 +321,13 @@ mod tests {
             handler_name: "sheets".to_string(),
             extensions: vec!["xlsx".to_string()],
             capabilities: FcpCapabilities::default(),
+            agent_help: None,
         });
         let _rx2 = bridge.register(FcpRegisterParams {
             handler_name: "midi".to_string(),
             extensions: vec!["mid".to_string()],
             capabilities: FcpCapabilities::default(),
+            agent_help: None,
         });
 
         assert_eq!(bridge.lookup_live("xlsx"), Some("sheets".to_string()));
@@ -321,12 +345,14 @@ mod tests {
             handler_name: "sheets".to_string(),
             extensions: vec!["xlsx".to_string()],
             capabilities: FcpCapabilities::default(),
+            agent_help: None,
         });
         // Re-register with different extensions
         let _rx2 = bridge.register(FcpRegisterParams {
             handler_name: "sheets".to_string(),
             extensions: vec!["xlsx".to_string(), "csv".to_string()],
             capabilities: FcpCapabilities::default(),
+            agent_help: None,
         });
 
         assert_eq!(bridge.lookup_live("xlsx"), Some("sheets".to_string()));
@@ -349,6 +375,7 @@ mod tests {
             handler_name: "sheets".to_string(),
             extensions: vec!["xlsx".to_string()],
             capabilities: FcpCapabilities::default(),
+            agent_help: None,
         });
 
         // Spawn a mock handler that echoes back
@@ -394,6 +421,7 @@ mod tests {
             handler_name: "slow".to_string(),
             extensions: vec!["slow".to_string()],
             capabilities: FcpCapabilities::default(),
+            agent_help: None,
         });
         // Drop _rx so the channel closes immediately, simulating disconnect
         drop(_rx);
@@ -402,5 +430,31 @@ mod tests {
             .route_ops("slow", Path::new("/tmp/test.slow"), vec![])
             .await;
         assert!(matches!(result, Err(FcpRouteError::HandlerDisconnected(_))));
+    }
+
+    #[test]
+    fn test_list_agent_help() {
+        let bridge = FcpBridge::new();
+
+        // Handler with help
+        let _rx1 = bridge.register(FcpRegisterParams {
+            handler_name: "fcp-python".to_string(),
+            extensions: vec!["py".to_string()],
+            capabilities: FcpCapabilities::default(),
+            agent_help: Some("### python — LSP navigation".to_string()),
+        });
+
+        // Handler without help
+        let _rx2 = bridge.register(FcpRegisterParams {
+            handler_name: "fcp-rust".to_string(),
+            extensions: vec!["rs".to_string()],
+            capabilities: FcpCapabilities::default(),
+            agent_help: None,
+        });
+
+        let help = bridge.list_agent_help();
+        assert_eq!(help.len(), 1);
+        assert_eq!(help[0].0, "fcp-python");
+        assert_eq!(help[0].1, "### python — LSP navigation");
     }
 }

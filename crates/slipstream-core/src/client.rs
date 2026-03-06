@@ -41,7 +41,7 @@ impl Client {
     /// Connect to the daemon at the given socket path.
     /// If `auto_start` is true and the socket doesn't exist, spawn the daemon and retry.
     pub async fn connect(socket_path: &Path, auto_start: bool) -> Result<Self, ClientError> {
-        match UnixStream::connect(socket_path).await {
+        let result = match UnixStream::connect(socket_path).await {
             Ok(stream) => Ok(Self::from_stream(stream)),
             Err(e) if auto_start => {
                 auto_start_daemon(socket_path)?;
@@ -56,7 +56,16 @@ impl Client {
                 Err(ClientError::Connection(e))
             }
             Err(e) => Err(ClientError::Connection(e)),
+        };
+
+        // Advertise the socket path so child processes can discover the daemon.
+        // SAFETY: slipstream clients are single-threaded (current_thread runtime)
+        // and this runs before any worker threads are spawned.
+        if result.is_ok() {
+            unsafe { std::env::set_var("SLIPSTREAM_SOCKET", socket_path) };
         }
+
+        result
     }
 
     fn from_stream(stream: UnixStream) -> Self {
