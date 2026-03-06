@@ -609,6 +609,12 @@ Edits are tracked, batched, and conflict-checked. Exact string matching — no r
   ss_session("read src/main.rs")                    — full file
   ss_session("read src/main.rs start:10 end:50")    — line range
 
+## Batch read multiple files (one call)
+  ss(ops=[
+    {"method":"file.read","path":"src/a.rs"},
+    {"method":"file.read","path":"src/b.rs"}
+  ])
+
 ## Edit a file (ss — replaces Edit)
   ss(path="src/main.rs", old_str="foo", new_str="bar")
 
