@@ -88,7 +88,24 @@ fn real(name: &str, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).to_string()
 }
 
+/// Build platform-correct sed -i args (macOS needs `-i ''`, Linux needs `-i`).
+fn platform_sed_i_args(args: &[&str]) -> Vec<String> {
+    let mut out = Vec::new();
+    for &arg in args {
+        if arg == "-i" {
+            out.push("-i".into());
+            if cfg!(target_os = "macos") {
+                out.push(String::new());
+            }
+        } else {
+            out.push(arg.into());
+        }
+    }
+    out
+}
+
 /// Run shim sed -i (mutates file, no stdout to compare).
+/// With non-TTY passthrough, this execs real sed — args must be platform-correct.
 fn shim_sed_i(socket: &Path, args: &[&str]) {
     let bin = slipstream_bin();
     let link_dir = std::env::temp_dir().join(format!("slipstream-shim-test-{}", std::process::id()));
@@ -97,10 +114,11 @@ fn shim_sed_i(socket: &Path, args: &[&str]) {
     let _ = std::fs::remove_file(&link_path);
     std::os::unix::fs::symlink(&bin, &link_path).unwrap();
 
+    let cmd_args = platform_sed_i_args(args);
     let out = Command::new(&link_path)
-        .args(args)
+        .args(&cmd_args)
         .env("SLIPSTREAM_SOCKET", socket)
-        .env("SLIPSTREAM_SHIM_NO_FALLBACK", "1")
+        .env("SLIPSTREAM_SHIM_FALLBACK_DIR", find_real("sed").parent().unwrap())
         .output()
         .unwrap();
 
@@ -116,19 +134,7 @@ fn shim_sed_i(socket: &Path, args: &[&str]) {
 /// Run real sed -i on macOS (needs -i '') or Linux (needs -i).
 fn real_sed_i(args: &[&str], file: &Path) {
     let real_sed = find_real("sed");
-    let mut cmd_args: Vec<String> = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        if args[i] == "-i" {
-            cmd_args.push("-i".into());
-            if cfg!(target_os = "macos") {
-                cmd_args.push(String::new());
-            }
-        } else {
-            cmd_args.push(args[i].into());
-        }
-        i += 1;
-    }
+    let cmd_args = platform_sed_i_args(args);
     let out = Command::new(&real_sed)
         .args(&cmd_args)
         .output()
@@ -326,9 +332,9 @@ fn shim_vs_native() {
     let sr = dir.path().join("sed3r.py");
     write_file(&ss, &read_file(&f));
     write_file(&sr, &read_file(&f));
-    shim_sed_i(&socket, &["-i", "", "s/hello/greet/", ss.to_str().unwrap()]);
+    shim_sed_i(&socket, &["-i", "s/hello/greet/", ss.to_str().unwrap()]);
     real_sed_i(&["-i", "s/hello/greet/", sr.to_str().unwrap()], &sr);
-    check_file!("sed -i '' (macOS form)", &ss, &sr);
+    check_file!("sed -i passthrough", &ss, &sr);
 
     let ss = dir.path().join("sed4s.py");
     let sr = dir.path().join("sed4r.py");
@@ -347,8 +353,7 @@ fn shim_vs_native() {
     let ss = dir.path().join("sed5s.py");
     write_file(&ss, &read_file(&f));
     let before = read_file(&ss);
-    let (_, code) = shim(&socket, "sed", &["-i", "s/NONEXISTENT/X/", ss.to_str().unwrap()]);
-    check_eq!("sed -i zero matches exit code", code, 0);
+    shim_sed_i(&socket, &["-i", "s/NONEXISTENT/X/", ss.to_str().unwrap()]);
     check_eq!("sed -i zero matches file unchanged", read_file(&ss), before);
 
     let ss = dir.path().join("sed6s.py");

@@ -162,7 +162,7 @@ where
 }
 
 /// Exec the real binary, replacing this process. Never returns on success.
-fn fallback_exec(binary_name: &str, args: &[String]) -> ! {
+pub(super) fn fallback_exec(binary_name: &str, args: &[String]) -> ! {
     if let Some(real_binary) = find_real_binary(binary_name) {
         let err = std::process::Command::new(&real_binary).args(args).exec();
         eprintln!(
