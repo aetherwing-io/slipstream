@@ -134,20 +134,24 @@ pub async fn session_close(
     Ok(())
 }
 
-/// Emit an LLM-visible hint to stdout after successful daemon routing.
-pub fn emit_hint(binary_name: &str) {
+/// Check if this is the first shim invocation for the given category (read or
+/// write). If so, print an interstitial warning and return `true` — the caller
+/// should exit 2 without running the command. The LLM sees the warning, retries,
+/// and the counter file prevents the interstitial from firing again.
+pub fn shim_interstitial(binary_name: &str, category: &str) -> bool {
     if std::env::var("SLIPSTREAM_SHIM_QUIET").is_ok() {
-        return;
+        return false;
     }
 
-    // First invocation only — one-shot interstitial
-    let counter_path = std::path::PathBuf::from("/tmp/.slipstream_shim_hint_count");
+    let counter_path = std::path::PathBuf::from(format!(
+        "/tmp/.slipstream_shim_hint_{category}"
+    ));
     let count = std::fs::read_to_string(&counter_path)
         .ok()
         .and_then(|s| s.trim().parse::<u32>().ok())
         .unwrap_or(0);
     if count >= 1 {
-        return;
+        return false;
     }
     let _ = std::fs::write(&counter_path, (count + 1).to_string());
 
@@ -155,6 +159,7 @@ pub fn emit_hint(binary_name: &str) {
         "\u{26a0} {} compatibility mode. Run `slipstream --agents` for capabilities.",
         binary_name
     );
+    true
 }
 
 /// Run a closure with daemon connection, falling back to real binary on failure.
@@ -163,10 +168,7 @@ where
     F: FnOnce() -> Result<(), ShimError>,
 {
     match f() {
-        Ok(()) => {
-            emit_hint(binary_name);
-            0
-        }
+        Ok(()) => 0,
         Err(ShimError::Fallback) => fallback_exec(binary_name, args),
         Err(ShimError::Client(e)) => {
             if no_fallback() {
@@ -300,11 +302,9 @@ mod tests {
     }
 
     #[test]
-    fn emit_hint_suppressed_by_env() {
-        // Set the quiet env var and verify emit_hint returns without panicking.
-        // (We can't easily capture stderr in-process, but we verify the env check logic.)
+    fn shim_interstitial_suppressed_by_env() {
         std::env::set_var("SLIPSTREAM_SHIM_QUIET", "1");
-        emit_hint("cat"); // should return immediately, no output
+        assert!(!shim_interstitial("cat", "read"));
         std::env::remove_var("SLIPSTREAM_SHIM_QUIET");
     }
 

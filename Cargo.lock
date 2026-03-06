@@ -872,7 +872,7 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "slipstream-cli"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "clap",
  "fcp-regex-core",
@@ -888,7 +888,7 @@ dependencies = [
 
 [[package]]
 name = "slipstream-core"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "dashmap",
  "parking_lot",
@@ -901,7 +901,7 @@ dependencies = [
 
 [[package]]
 name = "slipstream-daemon"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "dashmap",
  "libc",
@@ -920,7 +920,7 @@ dependencies = [
 
 [[package]]
 name = "slipstream-mcp"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "rmcp",
  "schemars",
