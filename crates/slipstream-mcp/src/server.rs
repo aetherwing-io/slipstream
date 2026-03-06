@@ -34,6 +34,26 @@ impl Inner {
         }
         Ok(self.client.as_mut().expect("just connected"))
     }
+
+    /// Send a request, reconnecting once if the daemon connection is dead.
+    async fn request(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, ClientError> {
+        let client = self.ensure_connected().await?;
+        match client.request(method, params.clone()).await {
+            Ok(v) => Ok(v),
+            // RPC errors mean the daemon is alive — don't reconnect
+            Err(e @ ClientError::Rpc { .. }) => Err(e),
+            // Connection/IO/JSON errors mean the socket is dead — reconnect and retry once
+            Err(_) => {
+                self.client = None;
+                let client = self.ensure_connected().await?;
+                client.request(method, params).await
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -298,20 +318,10 @@ impl SlipstreamServer {
         match action {
             SessionAction::Open { files, name } => {
                 let session_name = name.unwrap_or_else(|| "default".to_string());
-
-                let client = match inner.ensure_connected().await {
-                    Ok(c) => c,
-                    Err(e) => return format_error(e),
-                };
-
-                let result = client
-                    .request("session.open", serde_json::json!({
-                        "files": files,
-                        "name": session_name,
-                    }))
-                    .await;
-
-                match result {
+                match inner.request("session.open", serde_json::json!({
+                    "files": files,
+                    "name": session_name,
+                })).await {
                     Ok(v) => {
                         if format::is_fcp_passthrough(&v) {
                             let text = format::format_fcp_passthrough(&v);
@@ -326,17 +336,10 @@ impl SlipstreamServer {
             }
             SessionAction::Flush { name, force } => {
                 let session_name = name.as_deref().unwrap_or("default");
-                let client = match inner.ensure_connected().await {
-                    Ok(c) => c,
-                    Err(e) => return format_error(e),
-                };
-                let result = client
-                    .request("session.flush", serde_json::json!({
-                        "session_id": session_name,
-                        "force": force,
-                    }))
-                    .await;
-                match result {
+                match inner.request("session.flush", serde_json::json!({
+                    "session_id": session_name,
+                    "force": force,
+                })).await {
                     Ok(v) => {
                         let text = format::format_flush(&v, session_name);
                         Ok(CallToolResult::success(vec![Content::text(text)]))
@@ -346,18 +349,11 @@ impl SlipstreamServer {
             }
             SessionAction::Close { name, flush, force } => {
                 let session_name = name.as_deref().unwrap_or("default");
-                let client = match inner.ensure_connected().await {
-                    Ok(c) => c,
-                    Err(e) => return format_error(e),
-                };
-                let result = client
-                    .request("session.close", serde_json::json!({
-                        "session_id": session_name,
-                        "flush": flush,
-                        "force": force,
-                    }))
-                    .await;
-                match result {
+                match inner.request("session.close", serde_json::json!({
+                    "session_id": session_name,
+                    "flush": flush,
+                    "force": force,
+                })).await {
                     Ok(v) => {
                         let text = if flush {
                             format::format_close(&v)
@@ -370,17 +366,10 @@ impl SlipstreamServer {
                 }
             }
             SessionAction::Register { path, handler } => {
-                let client = match inner.ensure_connected().await {
-                    Ok(c) => c,
-                    Err(e) => return format_error(e),
-                };
-                let result = client
-                    .request("coordinator.register", serde_json::json!({
-                        "path": path,
-                        "handler": handler,
-                    }))
-                    .await;
-                match result {
+                match inner.request("coordinator.register", serde_json::json!({
+                    "path": path,
+                    "handler": handler,
+                })).await {
                     Ok(v) => {
                         let tid = v.get("tracking_id").and_then(|t| t.as_str()).unwrap_or("?");
                         Ok(CallToolResult::success(vec![Content::text(
@@ -391,16 +380,9 @@ impl SlipstreamServer {
                 }
             }
             SessionAction::Unregister { tracking_id } => {
-                let client = match inner.ensure_connected().await {
-                    Ok(c) => c,
-                    Err(e) => return format_error(e),
-                };
-                let result = client
-                    .request("coordinator.unregister", serde_json::json!({
-                        "tracking_id": tracking_id,
-                    }))
-                    .await;
-                match result {
+                match inner.request("coordinator.unregister", serde_json::json!({
+                    "tracking_id": tracking_id,
+                })).await {
                     Ok(_) => Ok(CallToolResult::success(vec![Content::text(
                         format!("- unregistered {tracking_id}")
                     )])),
@@ -410,19 +392,12 @@ impl SlipstreamServer {
             SessionAction::Read { path, session, start, end, count } => {
                 let session_name = session.as_deref().unwrap_or("default");
 
-                let client = match inner.ensure_connected().await {
-                    Ok(c) => c,
-                    Err(e) => return format_error(e),
-                };
-
                 // Auto-open: tell daemon to open with this session name.
                 // If session already exists, daemon adds the file. If not, creates it.
-                let _open_result = client
-                    .request("session.open", serde_json::json!({
-                        "files": [&path],
-                        "name": session_name,
-                    }))
-                    .await;
+                let _ = inner.request("session.open", serde_json::json!({
+                    "files": [&path],
+                    "name": session_name,
+                })).await;
                 // Ignore open errors — file.read will fail with a clear message if needed.
 
                 let mut params = serde_json::json!({
@@ -438,7 +413,7 @@ impl SlipstreamServer {
                 if let Some(c) = count {
                     params["count"] = serde_json::json!(c);
                 }
-                match client.request("file.read", params).await {
+                match inner.request("file.read", params).await {
                     Ok(v) => {
                         let text = format::format_read(&v, &path, start, end);
                         Ok(CallToolResult::success(vec![Content::text(text)]))
@@ -447,15 +422,7 @@ impl SlipstreamServer {
                 }
             }
             SessionAction::Status => {
-                let client = match inner.ensure_connected().await {
-                    Ok(c) => c,
-                    Err(e) => return format_error(e),
-                };
-                let result = client
-                    .request("coordinator.status", serde_json::json!({}))
-                    .await;
-                // Status/list/check — keep JSON for now, these are rare diagnostic calls
-                match result {
+                match inner.request("coordinator.status", serde_json::json!({})).await {
                     Ok(v) => {
                         let text = serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string());
                         Ok(CallToolResult::success(vec![Content::text(text)]))
@@ -464,14 +431,7 @@ impl SlipstreamServer {
                 }
             }
             SessionAction::List => {
-                let client = match inner.ensure_connected().await {
-                    Ok(c) => c,
-                    Err(e) => return format_error(e),
-                };
-                let result = client
-                    .request("session.list", serde_json::json!({}))
-                    .await;
-                match result {
+                match inner.request("session.list", serde_json::json!({})).await {
                     Ok(v) => {
                         let text = serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string());
                         Ok(CallToolResult::success(vec![Content::text(text)]))
@@ -480,14 +440,7 @@ impl SlipstreamServer {
                 }
             }
             SessionAction::Check { action } => {
-                let client = match inner.ensure_connected().await {
-                    Ok(c) => c,
-                    Err(e) => return format_error(e),
-                };
-                let result = client
-                    .request("coordinator.check", serde_json::json!({ "action": action }))
-                    .await;
-                match result {
+                match inner.request("coordinator.check", serde_json::json!({ "action": action })).await {
                     Ok(v) => {
                         let text = serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string());
                         Ok(CallToolResult::success(vec![Content::text(text)]))
@@ -516,21 +469,14 @@ impl SlipstreamServer {
         force: bool,
     ) -> Result<CallToolResult, McpError> {
         let mut inner = self.inner.lock().await;
-        let client = match inner.ensure_connected().await {
-            Ok(c) => c,
-            Err(e) => return format_error(e),
-        };
 
         let mut output = serde_json::Map::new();
 
         // 1. Open session with a one-shot name
-        let open_result = match client
-            .request("session.open", serde_json::json!({
-                "files": files,
-                "name": "__oneshot__",
-            }))
-            .await
-        {
+        let open_result = match inner.request("session.open", serde_json::json!({
+            "files": files,
+            "name": "__oneshot__",
+        })).await {
             Ok(v) => v,
             Err(e) => return format_error(e),
         };
@@ -549,13 +495,13 @@ impl SlipstreamServer {
             let read_ops: Vec<serde_json::Value> = files.iter()
                 .map(|f| serde_json::json!({ "method": "file.read", "path": f }))
                 .collect();
-            match client.request("batch", serde_json::json!({
+            match inner.request("batch", serde_json::json!({
                 "session_id": session_id,
                 "ops": read_ops,
             })).await {
                 Ok(v) => { output.insert("read".to_string(), v); }
                 Err(e) => {
-                    let _ = client.request("session.close", serde_json::json!({
+                    let _ = inner.request("session.close", serde_json::json!({
                         "session_id": session_id,
                         "flush": false,
                     })).await;
@@ -567,13 +513,13 @@ impl SlipstreamServer {
         // 3. Apply ops if provided — save a copy for formatting
         let saved_ops = ops.clone();
         if let Some(ops) = ops {
-            match client.request("batch", serde_json::json!({
+            match inner.request("batch", serde_json::json!({
                 "session_id": session_id,
                 "ops": ops,
             })).await {
                 Ok(v) => { output.insert("batch".to_string(), v); }
                 Err(e) => {
-                    let _ = client.request("session.close", serde_json::json!({
+                    let _ = inner.request("session.close", serde_json::json!({
                         "session_id": session_id,
                         "flush": false,
                     })).await;
@@ -583,7 +529,7 @@ impl SlipstreamServer {
         }
 
         // 4. Close (with auto-flush handled by daemon)
-        match client.request("session.close", serde_json::json!({
+        match inner.request("session.close", serde_json::json!({
             "session_id": session_id,
             "flush": flush,
             "force": force,
@@ -606,16 +552,11 @@ impl SlipstreamServer {
     ) -> Result<CallToolResult, McpError> {
         let mut inner = self.inner.lock().await;
 
-        let client = match inner.ensure_connected().await {
-            Ok(c) => c,
-            Err(e) => return format_error(e),
-        };
-
         let mut output = serde_json::Map::new();
 
         // Apply batch ops — save for formatting
         let saved_ops = ops.clone();
-        match client.request("batch", serde_json::json!({
+        match inner.request("batch", serde_json::json!({
             "session_id": session_name,
             "ops": ops,
         })).await {
@@ -625,7 +566,7 @@ impl SlipstreamServer {
 
         // Flush if requested
         if flush {
-            match client.request("session.flush", serde_json::json!({
+            match inner.request("session.flush", serde_json::json!({
                 "session_id": session_name,
                 "force": force,
             })).await {
