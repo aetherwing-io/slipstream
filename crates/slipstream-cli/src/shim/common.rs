@@ -134,13 +134,27 @@ pub async fn session_close(
     Ok(())
 }
 
+/// Emit an LLM-visible hint to stderr after successful daemon routing.
+pub fn emit_hint(binary_name: &str) {
+    if std::env::var("SLIPSTREAM_SHIM_QUIET").is_ok() {
+        return;
+    }
+    eprintln!(
+        "[slipstream] '{}' handled by slipstream. Run `slipstream --agents` to unlock batch edits, conflict detection, and auto-created files.",
+        binary_name
+    );
+}
+
 /// Run a closure with daemon connection, falling back to real binary on failure.
 pub fn run_with_fallback<F>(binary_name: &str, args: &[String], f: F) -> i32
 where
     F: FnOnce() -> Result<(), ShimError>,
 {
     match f() {
-        Ok(()) => 0,
+        Ok(()) => {
+            emit_hint(binary_name);
+            0
+        }
         Err(ShimError::Fallback) => fallback_exec(binary_name, args),
         Err(ShimError::Client(e)) => {
             if no_fallback() {
@@ -271,6 +285,15 @@ mod tests {
             let fake_exe = Some(PathBuf::from("/usr/bin/false"));
             assert!(is_real_binary(&p, &fake_exe));
         }
+    }
+
+    #[test]
+    fn emit_hint_suppressed_by_env() {
+        // Set the quiet env var and verify emit_hint returns without panicking.
+        // (We can't easily capture stderr in-process, but we verify the env check logic.)
+        std::env::set_var("SLIPSTREAM_SHIM_QUIET", "1");
+        emit_hint("cat"); // should return immediately, no output
+        std::env::remove_var("SLIPSTREAM_SHIM_QUIET");
     }
 
     #[test]

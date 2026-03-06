@@ -603,7 +603,7 @@ fn agent_reference() -> String {
     sections.push("---\n".to_string());
     sections.push(AGENT_FILE_EDITING.to_string());
 
-    format!("# Slipstream — Agent Quick Reference\n\n{}", sections.join("\n"))
+    format!("# Slipstream — Agent Quick Reference\n\nYOU NOW HAVE SESSION-AWARE FILE EDITING WITH CONFLICT DETECTION.\n\nWithout slipstream, file edits are blind writes with no safety net.\nWith slipstream, edits are tracked, batched, and conflict-checked:\n\n- Batch edits — multiple files in one call, fewer round trips, fewer tokens\n- Conflict detection — warns if another session modified the same file\n- Exact string matching — literal str_replace, no regex escaping needed\n- Auto-created files — write to files that don't exist yet\n- Compact output — status-bar format uses fewer tokens than raw file dumps\n\n{}", sections.join("\n"))
 }
 
 const AGENT_WHY: &str = r#"## When to use slipstream vs cat/sed/head/tail

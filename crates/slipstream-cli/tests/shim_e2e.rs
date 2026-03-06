@@ -67,6 +67,7 @@ fn shim(socket: &Path, name: &str, args: &[&str]) -> (String, i32) {
     let out = Command::new(&link_path)
         .args(args)
         .env("SLIPSTREAM_SOCKET", socket)
+        .env("SLIPSTREAM_SHIM_QUIET", "1")
         .env("SLIPSTREAM_SHIM_FALLBACK_DIR", find_real(name).parent().unwrap())
         .output()
         .unwrap();
@@ -76,6 +77,56 @@ fn shim(socket: &Path, name: &str, args: &[&str]) -> (String, i32) {
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let code = out.status.code().unwrap_or(-1);
     (stdout, code)
+}
+
+/// Like `shim()` but returns (stdout, stderr, exit_code) and does NOT set SLIPSTREAM_SHIM_QUIET.
+fn shim_with_stderr(socket: &Path, name: &str, args: &[&str]) -> (String, String, i32) {
+    let bin = slipstream_bin();
+    let link_dir = std::env::temp_dir().join(format!("slipstream-shim-test-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&link_dir);
+    let link_path = link_dir.join(name);
+    let _ = std::fs::remove_file(&link_path);
+    std::os::unix::fs::symlink(&bin, &link_path).unwrap();
+
+    let out = Command::new(&link_path)
+        .args(args)
+        .env("SLIPSTREAM_SOCKET", socket)
+        .env("SLIPSTREAM_SHIM_FALLBACK_DIR", find_real(name).parent().unwrap())
+        .env_remove("SLIPSTREAM_SHIM_QUIET")
+        .output()
+        .unwrap();
+
+    let _ = std::fs::remove_file(&link_path);
+
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let code = out.status.code().unwrap_or(-1);
+    (stdout, stderr, code)
+}
+
+/// Like `shim()` but with SLIPSTREAM_SHIM_QUIET=1 explicitly set, returns stderr too.
+fn shim_quiet(socket: &Path, name: &str, args: &[&str]) -> (String, String, i32) {
+    let bin = slipstream_bin();
+    let link_dir = std::env::temp_dir().join(format!("slipstream-shim-test-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&link_dir);
+    let link_path = link_dir.join(name);
+    let _ = std::fs::remove_file(&link_path);
+    std::os::unix::fs::symlink(&bin, &link_path).unwrap();
+
+    let out = Command::new(&link_path)
+        .args(args)
+        .env("SLIPSTREAM_SOCKET", socket)
+        .env("SLIPSTREAM_SHIM_QUIET", "1")
+        .env("SLIPSTREAM_SHIM_FALLBACK_DIR", find_real(name).parent().unwrap())
+        .output()
+        .unwrap();
+
+    let _ = std::fs::remove_file(&link_path);
+
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let code = out.status.code().unwrap_or(-1);
+    (stdout, stderr, code)
 }
 
 fn slipstream_bin() -> PathBuf {
@@ -118,6 +169,7 @@ fn shim_sed_i(socket: &Path, args: &[&str]) {
     let out = Command::new(&link_path)
         .args(&cmd_args)
         .env("SLIPSTREAM_SOCKET", socket)
+        .env("SLIPSTREAM_SHIM_QUIET", "1")
         .env("SLIPSTREAM_SHIM_FALLBACK_DIR", find_real("sed").parent().unwrap())
         .output()
         .unwrap();
@@ -572,6 +624,7 @@ fn shim_vs_native() {
             .args(&[fp])
             .env("SLIPSTREAM_SOCKET", &socket)
             .env("SLIPSTREAM_SHIM_NO_FALLBACK", "1")
+            .env("SLIPSTREAM_SHIM_QUIET", "1")
             .env_remove("SLIPSTREAM_SHIM_FALLBACK_DIR")
             .output()
             .unwrap();
@@ -586,6 +639,71 @@ fn shim_vs_native() {
             out.status.code().unwrap_or(-1),
             0
         );
+    }
+
+    // ── LLM hint tests ──
+
+    // Hint appears in stderr on successful daemon routing
+    {
+        let (stdout, stderr, code) = shim_with_stderr(&socket, "cat", &[fp]);
+        let r = real("cat", &[fp]);
+        check!("hint: cat stdout unchanged", stdout, r);
+        check_eq!("hint: cat exit code", code, 0);
+        if stderr.contains("'cat' handled by slipstream") {
+            pass += 1;
+        } else {
+            eprintln!("FAIL: hint: stderr contains hint");
+            eprintln!("  stderr: {:?}", stderr);
+            fail += 1;
+        }
+    }
+
+    // Hint suppressed by SLIPSTREAM_SHIM_QUIET=1
+    {
+        let (_, stderr, _) = shim_quiet(&socket, "cat", &[fp]);
+        if !stderr.contains("[slipstream]") {
+            pass += 1;
+        } else {
+            eprintln!("FAIL: hint: quiet suppresses hint");
+            eprintln!("  stderr: {:?}", stderr);
+            fail += 1;
+        }
+    }
+
+    // Hint appears for head too
+    {
+        let (_, stderr, _) = shim_with_stderr(&socket, "head", &["-n", "5", fp]);
+        if stderr.contains("'head' handled by slipstream") {
+            pass += 1;
+        } else {
+            eprintln!("FAIL: hint: head stderr contains hint");
+            eprintln!("  stderr: {:?}", stderr);
+            fail += 1;
+        }
+    }
+
+    // Hint appears for tail too
+    {
+        let (_, stderr, _) = shim_with_stderr(&socket, "tail", &["-n", "5", fp]);
+        if stderr.contains("'tail' handled by slipstream") {
+            pass += 1;
+        } else {
+            eprintln!("FAIL: hint: tail stderr contains hint");
+            eprintln!("  stderr: {:?}", stderr);
+            fail += 1;
+        }
+    }
+
+    // Hint appears for sed -n (range print routed through daemon)
+    {
+        let (_, stderr, _) = shim_with_stderr(&socket, "sed", &["-n", "5,10p", fp]);
+        if stderr.contains("'sed' handled by slipstream") {
+            pass += 1;
+        } else {
+            eprintln!("FAIL: hint: sed stderr contains hint");
+            eprintln!("  stderr: {:?}", stderr);
+            fail += 1;
+        }
     }
 
     // ── Summary ──
