@@ -156,7 +156,7 @@ pub fn shim_interstitial(binary_name: &str, category: &str) -> bool {
     let _ = std::fs::write(&counter_path, (count + 1).to_string());
 
     println!(
-        "\u{26a0} {} compatibility mode. Run `slipstream --agents` for capabilities.",
+        "\u{26a0} {} compatibility mode. Run `slipstream --agents` to fix.",
         binary_name
     );
     true
