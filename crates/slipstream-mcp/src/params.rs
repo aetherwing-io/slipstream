@@ -33,9 +33,9 @@ pub struct SsParams {
     // --- Quick mode params ---
     /// Quick mode: target file path
     pub path: Option<String>,
-    /// Quick mode: text to find (substring match)
+    /// Quick edit: text to find. Omit for file creation/overwrite.
     pub old_str: Option<String>,
-    /// Quick mode: replacement text
+    /// Quick edit: replacement text. Create mode: full file content.
     pub new_str: Option<String>,
     /// Quick mode: replace every occurrence (default: false, errors if >1 match)
     pub replace_all: Option<bool>,

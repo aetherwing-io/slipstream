@@ -437,3 +437,121 @@ async fn mcp_status_returns_all_fields() {
 
     let _ = std::fs::remove_file(&sock);
 }
+
+// --- Quick mode file creation tests ---
+
+/// ss(path, new_str) on a nonexistent file → creates it on disk.
+#[tokio::test]
+async fn quick_create_new_file() {
+    let (_server, mut client, sock, dir) = setup().await;
+    let file = dir.path().join("created.py");
+    assert!(!file.exists());
+
+    let sid = "__oneshot__";
+    client
+        .request(
+            "session.open",
+            serde_json::json!({ "files": [file.to_str().unwrap()], "name": sid }),
+        )
+        .await
+        .unwrap();
+
+    let result = client
+        .request(
+            "batch",
+            serde_json::json!({
+                "session_id": sid,
+                "ops": [{"method": "file.write", "path": file.to_str().unwrap(), "content": "print('hello')"}],
+            }),
+        )
+        .await
+        .unwrap();
+    let arr = result.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+
+    client
+        .request("session.close", serde_json::json!({ "session_id": sid, "flush": true }))
+        .await
+        .unwrap();
+
+    assert!(file.exists());
+    let content = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(content, "print('hello')\n");
+
+    let _ = std::fs::remove_file(&sock);
+}
+
+/// ss(path, new_str) on an existing file → replaces entire content.
+#[tokio::test]
+async fn quick_overwrite_existing() {
+    let (_server, mut client, sock, dir) = setup().await;
+    let file = dir.path().join("existing.txt");
+    std::fs::write(&file, "old content\n").unwrap();
+
+    let sid = "__oneshot__";
+    client
+        .request(
+            "session.open",
+            serde_json::json!({ "files": [file.to_str().unwrap()], "name": sid }),
+        )
+        .await
+        .unwrap();
+
+    client
+        .request(
+            "batch",
+            serde_json::json!({
+                "session_id": sid,
+                "ops": [{"method": "file.write", "path": file.to_str().unwrap(), "content": "new content"}],
+            }),
+        )
+        .await
+        .unwrap();
+
+    client
+        .request("session.close", serde_json::json!({ "session_id": sid, "flush": true }))
+        .await
+        .unwrap();
+
+    let content = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(content, "new content\n");
+
+    let _ = std::fs::remove_file(&sock);
+}
+
+/// Multiline content with \n in string works correctly.
+#[tokio::test]
+async fn quick_create_multiline() {
+    let (_server, mut client, sock, dir) = setup().await;
+    let file = dir.path().join("multi.py");
+
+    let sid = "__oneshot__";
+    client
+        .request(
+            "session.open",
+            serde_json::json!({ "files": [file.to_str().unwrap()], "name": sid }),
+        )
+        .await
+        .unwrap();
+
+    client
+        .request(
+            "batch",
+            serde_json::json!({
+                "session_id": sid,
+                "ops": [{"method": "file.write", "path": file.to_str().unwrap(), "content": "line1\nline2\nline3"}],
+            }),
+        )
+        .await
+        .unwrap();
+
+    client
+        .request("session.close", serde_json::json!({ "session_id": sid, "flush": true }))
+        .await
+        .unwrap();
+
+    let content = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(content, "line1\nline2\nline3\n");
+
+    let _ = std::fs::remove_file(&sock);
+}

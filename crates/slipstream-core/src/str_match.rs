@@ -159,6 +159,90 @@ pub fn compute_replacement(
     (m.start_line, m.end_line + 1, replacement_lines)
 }
 
+/// Coalesce all matches that touch the same line span into one replacement,
+/// applying each within-span substitution left-to-right against the
+/// accumulated line text. Returns `(start_line, end_line_exclusive,
+/// replacement_lines)` tuples sorted bottom-up so callers can queue/splice
+/// without offset drift.
+pub fn compute_all_replacements(
+    haystack: &[String],
+    matches: &[MatchPos],
+    new_str: &str,
+) -> Vec<(usize, usize, Vec<String>)> {
+    if matches.is_empty() {
+        return vec![];
+    }
+
+    // Sort top-down so we can group overlapping spans.
+    let mut sorted = matches.to_vec();
+    sorted.sort_unstable_by(|a, b| {
+        a.start_line
+            .cmp(&b.start_line)
+            .then(a.start_col.cmp(&b.start_col))
+    });
+
+    let new_text = {
+        let n = normalize_needle(new_str);
+        if new_str.is_empty() {
+            String::new()
+        } else {
+            n
+        }
+    };
+
+    let line_starts = build_line_starts(haystack);
+    let mut results: Vec<(usize, usize, Vec<String>)> = Vec::new();
+
+    let mut i = 0;
+    while i < sorted.len() {
+        let group_start_line = sorted[i].start_line;
+        let mut group_end_line = sorted[i].end_line;
+
+        // Collect subsequent matches whose start_line falls within this group.
+        let mut j = i + 1;
+        while j < sorted.len() && sorted[j].start_line <= group_end_line {
+            group_end_line = group_end_line.max(sorted[j].end_line);
+            j += 1;
+        }
+        let group = &sorted[i..j];
+
+        if group.len() == 1 {
+            // Single match in this span — use the existing fast path.
+            results.push(compute_replacement(haystack, &group[0], new_str));
+        } else {
+            // Multiple matches share this line span. Join the span lines
+            // into a working string and apply substitutions left-to-right
+            // with a running byte delta.
+            let end = group_end_line.min(haystack.len() - 1);
+            let mut working = haystack[group_start_line..=end].join("\n");
+            let span_base = line_starts[group_start_line];
+
+            let mut delta: isize = 0;
+            for m in group {
+                let orig_start = line_starts[m.start_line] + m.start_col;
+                let orig_end = line_starts[m.end_line] + m.end_col;
+
+                let w_start = (orig_start as isize - span_base as isize + delta) as usize;
+                let w_end = (orig_end as isize - span_base as isize + delta) as usize;
+
+                let old_len = w_end - w_start;
+                working.replace_range(w_start..w_end, &new_text);
+                delta += new_text.len() as isize - old_len as isize;
+            }
+
+            let replacement_lines: Vec<String> =
+                working.split('\n').map(|s| s.to_string()).collect();
+            results.push((group_start_line, group_end_line + 1, replacement_lines));
+        }
+
+        i = j;
+    }
+
+    // Return bottom-up so queue_edit/splice callers are safe.
+    results.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+    results
+}
+
 /// Split new_text into owned lines for Edit content.
 pub fn split_new_text(s: &str) -> Vec<String> {
     split_into_lines(s).into_iter().map(|s| s.to_owned()).collect()
@@ -415,5 +499,81 @@ mod tests {
         assert_eq!(needle_line_count("a\nb\nc"), 3);
         assert_eq!(needle_line_count("single"), 1);
         assert_eq!(needle_line_count(""), 0);
+    }
+
+    // --- compute_all_replacements tests ---
+
+    #[test]
+    fn replace_all_same_line_two_matches() {
+        let haystack = lines(&["answer and answer"]);
+        let result = find_str_in_lines(&haystack, "answer");
+        assert_eq!(result.matches.len(), 2);
+        let replacements = compute_all_replacements(&haystack, &result.matches, "REPLACED");
+        assert_eq!(replacements.len(), 1);
+        let (start, end, new_lines) = &replacements[0];
+        assert_eq!(*start, 0);
+        assert_eq!(*end, 1);
+        assert_eq!(new_lines, &["REPLACED and REPLACED"]);
+    }
+
+    #[test]
+    fn replace_all_different_lines() {
+        let haystack = lines(&["answer", "other", "answer"]);
+        let result = find_str_in_lines(&haystack, "answer");
+        let replacements = compute_all_replacements(&haystack, &result.matches, "X");
+        // Two disjoint spans → two replacements, bottom-up order
+        assert_eq!(replacements.len(), 2);
+        assert_eq!(replacements[0].0, 2); // bottom first
+        assert_eq!(replacements[1].0, 0);
+    }
+
+    #[test]
+    fn replace_all_three_matches_same_line() {
+        let haystack = lines(&["a-a-a"]);
+        let result = find_str_in_lines(&haystack, "a");
+        assert_eq!(result.matches.len(), 3);
+        let replacements = compute_all_replacements(&haystack, &result.matches, "b");
+        assert_eq!(replacements.len(), 1);
+        assert_eq!(replacements[0].2, vec!["b-b-b"]);
+    }
+
+    #[test]
+    fn replace_all_mixed_same_and_different_lines() {
+        let haystack = lines(&["X and X", "other", "X again"]);
+        let result = find_str_in_lines(&haystack, "X");
+        assert_eq!(result.matches.len(), 3);
+        let replacements = compute_all_replacements(&haystack, &result.matches, "Y");
+        // Line 0 has 2 matches (coalesced), line 2 has 1 match
+        assert_eq!(replacements.len(), 2);
+        assert_eq!(replacements[0].2, vec!["Y again"]);       // line 2 (bottom-up)
+        assert_eq!(replacements[1].2, vec!["Y and Y"]);        // line 0
+    }
+
+    #[test]
+    fn replace_all_single_match_uses_fast_path() {
+        let haystack = lines(&["hello world"]);
+        let result = find_str_in_lines(&haystack, "world");
+        let replacements = compute_all_replacements(&haystack, &result.matches, "earth");
+        assert_eq!(replacements.len(), 1);
+        assert_eq!(replacements[0].2, vec!["hello earth"]);
+    }
+
+    #[test]
+    fn replace_all_empty_replacement() {
+        let haystack = lines(&["a-a-a"]);
+        let result = find_str_in_lines(&haystack, "a");
+        let replacements = compute_all_replacements(&haystack, &result.matches, "");
+        assert_eq!(replacements.len(), 1);
+        assert_eq!(replacements[0].2, vec!["--"]);
+    }
+
+    #[test]
+    fn replace_all_longer_replacement() {
+        // Replacement longer than original — delta must track correctly
+        let haystack = lines(&["a.a.a"]);
+        let result = find_str_in_lines(&haystack, "a");
+        let replacements = compute_all_replacements(&haystack, &result.matches, "XYZ");
+        assert_eq!(replacements.len(), 1);
+        assert_eq!(replacements[0].2, vec!["XYZ.XYZ.XYZ"]);
     }
 }

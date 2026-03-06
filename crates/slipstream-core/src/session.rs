@@ -307,16 +307,12 @@ impl Session {
         }
 
         let first_match = result.matches[0].start_line;
+        let matches = result.matches;
 
-        // Queue from bottom-up so positions don't shift during apply_edits
-        let mut matches = result.matches;
-        matches.sort_unstable_by(|a, b| b.start_line.cmp(&a.start_line));
-
-        // Compute replacements while we still hold the read lock
-        let replacements: Vec<_> = matches
-            .iter()
-            .map(|m| str_match::compute_replacement(&buf.lines, m, new_str))
-            .collect();
+        // Coalesce same-line-span matches into single replacements to avoid
+        // overwrites when multiple matches share a line.
+        let replacements =
+            str_match::compute_all_replacements(&buf.lines, &matches, new_str);
 
         drop(buf); // release read lock before mutating edits
 
@@ -344,10 +340,14 @@ impl Session {
         let first_match = result.matches[0].start_line;
         let match_count = result.matches.len();
 
-        let mut matches = result.matches;
-        matches.sort_unstable_by(|a, b| b.start_line.cmp(&a.start_line));
-        for m in &matches {
-            let (start, end, new_lines) = str_match::compute_replacement(lines, m, new_str);
+        // Snapshot so compute_all_replacements sees consistent byte offsets
+        // (splice would corrupt column math on subsequent matches).
+        let snapshot = lines.clone();
+        let replacements =
+            str_match::compute_all_replacements(&snapshot, &result.matches, new_str);
+
+        // Already bottom-up — splice without offset drift.
+        for (start, end, new_lines) in replacements {
             lines.splice(start..end, new_lines);
         }
         Ok((first_match, match_count))

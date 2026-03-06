@@ -51,6 +51,7 @@ pub enum OpResult {
     Read {
         lines: Vec<String>,
         cursor: usize,
+        trailing_newline: bool,
     },
     Write {
         edits_pending: usize,
@@ -78,7 +79,7 @@ impl OpResult {
     /// Serialize to JSON for wire response.
     pub fn to_json(&self) -> serde_json::Value {
         match self {
-            OpResult::Read { lines, cursor } => {
+            OpResult::Read { lines, cursor, .. } => {
                 serde_json::json!({"lines": lines, "cursor": cursor})
             }
             OpResult::Write { edits_pending, .. } => {
@@ -103,6 +104,7 @@ pub fn dispatch_op(
 ) -> Result<OpResult, slipstream_core::manager::ManagerError> {
     match op {
         Op::Read { path, start, end, count } => {
+            let trailing_newline = session.file(&path)?.buffer.read().trailing_newline;
             let (lines, cursor) = if let (Some(start), Some(end)) = (start, end) {
                 let lines = session.read(&path, start, end)?;
                 (lines, end)
@@ -114,7 +116,7 @@ pub fn dispatch_op(
                 let lines = handle.read_range(0, lc)?;
                 (lines, lc)
             };
-            Ok(OpResult::Read { lines, cursor })
+            Ok(OpResult::Read { lines, cursor, trailing_newline })
         }
         Op::Write { path, start, end, content } => {
             // Resolve None start/end: replace entire file
@@ -685,7 +687,7 @@ fn handle_file_read(mut req: Request, mgr: &Arc<SessionManager>) -> Response {
 
     match result {
         Ok(op_result) => {
-            if let OpResult::Read { lines, cursor } = op_result {
+            if let OpResult::Read { lines, cursor, trailing_newline } = op_result {
                 // Standalone reads populate other_sessions (batch intentionally skips this)
                 let canonical = mgr.canonical_path(&params.path);
                 let other_sessions = if let Ok(canonical) = canonical {
@@ -707,6 +709,7 @@ fn handle_file_read(mut req: Request, mgr: &Arc<SessionManager>) -> Response {
                     FileReadResult {
                         lines,
                         cursor,
+                        trailing_newline,
                         other_sessions,
                     },
                 )

@@ -118,6 +118,7 @@ pub struct FileReadParams {
 pub struct FileReadResult {
     pub lines: Vec<String>,
     pub cursor: usize,
+    pub trailing_newline: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub other_sessions: Vec<OtherSessionInfo>,
 }

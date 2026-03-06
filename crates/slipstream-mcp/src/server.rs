@@ -77,6 +77,15 @@ ss(ops=[
 ])
 ```
 
+## Creating / Overwriting
+
+```
+ss(path="new.py", new_str="import sys\nprint('hello')")
+```
+
+Creates the file if it doesn't exist, or replaces its entire content.
+Equivalent to: `ss(ops=[{"method":"file.write","path":"new.py","content":"..."}])`
+
 ## Reading
 
 ```
@@ -201,41 +210,46 @@ impl SlipstreamServer {
         }
     }
 
-    #[tool(description = "Edit files. ss(path, old_str, new_str) for a single edit. ss(ops=[...]) for multiple edits across files. Both are self-contained — no setup needed.")]
+    #[tool(description = "Edit or create files. ss(path, old_str, new_str) for edits. ss(path, new_str) to create/overwrite. ss(ops=[...]) for batch. All self-contained.")]
     async fn ss(
         &self,
         Parameters(p): Parameters<SsParams>,
     ) -> Result<CallToolResult, McpError> {
-        // Quick mode: path + old_str + new_str → single str_replace
+        // Quick mode: path provided
         if let Some(ref path) = p.path {
-            let old_str = match p.old_str {
-                Some(ref s) => s.clone(),
-                None => return err_result(format!(
-                    "quick mode requires old_str (received: path={:?}, old_str=None, new_str={:?})",
-                    path, p.new_str
-                )),
+            let (ops, files) = match (&p.old_str, &p.new_str) {
+                // Edit: old_str + new_str → str_replace
+                (Some(old_str), Some(new_str)) => {
+                    let replace_all = p.replace_all.unwrap_or(false);
+                    let mut op = serde_json::json!({
+                        "method": "file.str_replace",
+                        "path": path,
+                        "old_str": old_str,
+                        "new_str": new_str,
+                    });
+                    if replace_all {
+                        op["replace_all"] = serde_json::json!(true);
+                    }
+                    (serde_json::Value::Array(vec![op]), vec![path.clone()])
+                }
+                // Create/overwrite: new_str only → file.write
+                (None, Some(new_str)) => {
+                    let op = serde_json::json!({
+                        "method": "file.write",
+                        "path": path,
+                        "content": new_str,
+                    });
+                    (serde_json::Value::Array(vec![op]), vec![path.clone()])
+                }
+                // old_str without new_str → error
+                (Some(_), None) => return err_result(
+                    "new_str required with old_str".to_string()
+                ),
+                // Neither → error
+                (None, None) => return err_result(
+                    "provide old_str+new_str or new_str alone".to_string()
+                ),
             };
-            let new_str = match p.new_str {
-                Some(ref s) => s.clone(),
-                None => return err_result(format!(
-                    "quick mode requires new_str (received: path={:?}, old_str={:?}, new_str=None)",
-                    path, p.old_str
-                )),
-            };
-            let replace_all = p.replace_all.unwrap_or(false);
-
-            let mut op = serde_json::json!({
-                "method": "file.str_replace",
-                "path": path,
-                "old_str": old_str,
-                "new_str": new_str,
-            });
-            if replace_all {
-                op["replace_all"] = serde_json::json!(true);
-            }
-
-            let ops = serde_json::Value::Array(vec![op]);
-            let files = vec![path.clone()];
 
             // If an explicit session is given, use session mode
             if let Some(ref session_name) = p.session {
@@ -630,8 +644,9 @@ impl ServerHandler for SlipstreamServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(
-                "Slipstream edits files. \
+                "Slipstream edits and creates files. \
                  ss(path, old_str, new_str) for single edits. \
+                 ss(path, new_str) to create or overwrite a file. \
                  ss(ops=[...]) for batch edits across files. \
                  ss_session('read <path>') to read files. \
                  ss_help for advanced options.".into()

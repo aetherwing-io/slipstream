@@ -15,8 +15,12 @@ struct Cli {
     #[arg(long)]
     no_auto_start: bool,
 
+    /// Print the agent quick reference (why and how to use slipstream)
+    #[arg(long)]
+    agents: bool,
+
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -116,9 +120,6 @@ enum Command {
         ops: String,
     },
 
-    /// LLM/agent quick reference. If you are an AI agent, start here.
-    Agent,
-
     /// Open files, apply operations, optionally flush, and close — all in one call.
     /// Combines open + batch + flush + close into a single CLI invocation.
     Exec {
@@ -184,14 +185,54 @@ enum FcpProtocol {
     RegexHelp,
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() {
+fn main() {
+    // Shim mode: if invoked as cat/head/tail/sed (via symlink), bypass clap entirely
+    let args: Vec<String> = std::env::args().collect();
+    let binary_name = args
+        .first()
+        .and_then(|a| std::path::Path::new(a).file_name())
+        .and_then(|n| n.to_str())
+        .unwrap_or("slipstream");
+
+    match binary_name {
+        "cat" | "head" | "tail" | "sed" => {
+            let code = slipstream_cli::shim::dispatch(binary_name, &args[1..]);
+            std::process::exit(code);
+        }
+        _ => {}
+    }
+
+    // Normal CLI mode
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build tokio runtime");
+    rt.block_on(async_main());
+}
+
+async fn async_main() {
     let cli = Cli::parse();
+
+    if cli.agents {
+        print!("{}", agent_reference());
+        return;
+    }
+
+    let command = match cli.command {
+        Some(cmd) => cmd,
+        None => {
+            // No subcommand and no --agents: show help
+            use clap::CommandFactory;
+            Cli::command().print_help().unwrap();
+            println!();
+            return;
+        }
+    };
 
     let socket_path = cli.socket.unwrap_or_else(client::default_socket_path);
     let auto_start = !cli.no_auto_start;
 
-    if let Err(e) = run(cli.command, &socket_path, auto_start).await {
+    if let Err(e) = run(command, &socket_path, auto_start).await {
         let error_json = match &e {
             ClientError::Rpc { code, message, data } => {
                 serde_json::json!({
@@ -341,11 +382,6 @@ async fn run(
                 "session_id": session,
                 "ops": ops_value,
             })).await?
-        }
-
-        Command::Agent => {
-            print!("{}", agent_reference());
-            return Ok(());
         }
 
         Command::Exec { files, ops, read_all, flush, force, no_batch } => {
@@ -547,6 +583,8 @@ Build regexes via named fragment composition. Runs in-process, no daemon needed.
 fn agent_reference() -> String {
     let mut sections = Vec::new();
 
+    sections.push(AGENT_WHY.to_string());
+
     // FCP header — only shown when at least one protocol is compiled in
     #[allow(unused_mut)]
     let mut fcp_protocols: Vec<&str> = Vec::new();
@@ -567,6 +605,27 @@ fn agent_reference() -> String {
 
     format!("# Slipstream — Agent Quick Reference\n\n{}", sections.join("\n"))
 }
+
+const AGENT_WHY: &str = r#"## WARNING: Do NOT use cat, sed, awk, or heredocs for file operations.
+
+Raw bash output is unfiltered — ANSI escape sequences, progress bars, and
+control characters will corrupt your context window, wasting 60-80% of
+tokens on noise.
+
+sed, awk, and heredocs silently corrupt files when patterns contain regex
+metacharacters, quotes, or indentation. Slipstream does exact string
+matching and never misinterprets special characters.
+
+Use slipstream for ALL file reads and edits:
+- `cat src/foo.py`          → `slipstream exec --files src/foo.py --read-all`
+- `head -n 50 src/foo.py`   → `slipstream read src/foo.py -l 0:50`
+- `sed -n '100,150p' f`     → `slipstream read f -l 100:150`
+- `sed -i 's/old/new/' f`   → `slipstream exec --files f --ops '[{"method":"file.str_replace","path":"f","old_str":"old","new_str":"new"}]' --flush`
+- `cat > f.py << 'EOF'`     → `slipstream exec --files f.py --ops '[{"method":"file.write","path":"f.py","content":"..."}]' --flush`
+
+If a slipstream command errors, do NOT fall back to bare bash. Fix the
+command syntax and retry.
+"#;
 
 #[cfg(feature = "fcp-regex")]
 const AGENT_FCP_REGEX: &str = r#"### regex — build regexes via named fragments (never write raw regex)
