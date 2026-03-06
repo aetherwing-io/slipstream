@@ -8,3 +8,4 @@
 .bv/
 .worktrees/
 __pycache__/
+.cargo/
