@@ -1,7 +1,7 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use slipstream_core::session::SessionId;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Deserialize content as either a JSON array of strings or a single string
 /// (split on newlines). Accepts both `"line1\nline2"` and `["line1","line2"]`.
@@ -225,6 +225,15 @@ pub enum Op {
 }
 
 impl Op {
+    pub fn path(&self) -> &Path {
+        match self {
+            Op::Read { path, .. }
+            | Op::Write { path, .. }
+            | Op::StrReplace { path, .. }
+            | Op::CursorMove { path, .. } => path,
+        }
+    }
+
     pub fn is_mutation(&self) -> bool {
         matches!(self, Op::Write { .. } | Op::StrReplace { .. })
     }

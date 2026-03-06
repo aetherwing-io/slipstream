@@ -240,6 +240,20 @@ fn session_not_found(id: Option<u64>, session_id: &str) -> Response {
     )
 }
 
+/// Ensure a session exists with the given files. Creates the session if it
+/// doesn't exist, or adds missing files to an existing session.
+fn ensure_session(
+    mgr: &SessionManager,
+    session_id: &SessionId,
+    paths: &[&Path],
+) -> Result<(), ManagerError> {
+    if mgr.has_session(session_id) {
+        mgr.add_files_to_session(session_id, paths)
+    } else {
+        mgr.create_session(session_id.clone(), paths)
+    }
+}
+
 fn inject_digest(
     mut response: Response,
     coordinator: &Coordinator,
@@ -674,6 +688,11 @@ fn handle_file_read(mut req: Request, mgr: &Arc<SessionManager>) -> Response {
         Err(resp) => return resp,
     };
 
+    // Implicit open: ensure session exists with this file
+    if let Err(e) = ensure_session(mgr, &params.session_id, &[&params.path]) {
+        return internal_error(req.id, format!("{e}"));
+    }
+
     let op = Op::Read {
         path: params.path.clone(),
         start: params.start,
@@ -741,6 +760,11 @@ fn handle_file_write(
         );
     }
 
+    // Implicit open: ensure session exists with this file
+    if let Err(e) = ensure_session(mgr, &params.session_id, &[&params.path]) {
+        return internal_error(req.id, format!("{e}"));
+    }
+
     let op = Op::Write {
         path: params.path,
         start: params.start,
@@ -769,6 +793,11 @@ fn handle_file_str_replace(
         Ok(p) => p,
         Err(resp) => return resp,
     };
+
+    // Implicit open: ensure session exists with this file
+    if let Err(e) = ensure_session(mgr, &params.session_id, &[&params.path]) {
+        return internal_error(req.id, format!("{e}"));
+    }
 
     let op = Op::StrReplace {
         path: params.path,
@@ -829,6 +858,19 @@ fn handle_batch(
                 ops.len()
             ),
         );
+    }
+
+    // Implicit open: collect unique paths and ensure session exists
+    let unique_paths: Vec<PathBuf> = {
+        let mut seen = std::collections::HashSet::new();
+        ops.iter()
+            .filter(|op| seen.insert(op.path().to_path_buf()))
+            .map(|op| op.path().to_path_buf())
+            .collect()
+    };
+    let path_refs: Vec<&Path> = unique_paths.iter().map(|p| p.as_path()).collect();
+    if let Err(e) = ensure_session(mgr, &session_id, &path_refs) {
+        return internal_error(req.id, format!("{e}"));
     }
 
     // Validate content size limits before entering the session lock

@@ -162,7 +162,7 @@ async fn batch_operations() {
 }
 
 #[tokio::test]
-async fn error_bad_session() {
+async fn implicit_open_on_read() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("f.txt");
     std::fs::write(&file, "x\n").unwrap();
@@ -173,23 +173,23 @@ async fn error_bad_session() {
 
     let mut client = connect_client(&sock).await;
 
-    // Request with a nonexistent session ID
-    let err = client
+    // Read with a nonexistent session — should auto-create session and succeed
+    let result = client
         .request("file.read", serde_json::json!({
-            "session_id": "nonexistent-session",
+            "session_id": "auto-created",
             "path": file.to_str().unwrap(),
             "start": 0,
             "end": 1,
         }))
         .await
-        .unwrap_err();
+        .unwrap();
 
-    match err {
-        slipstream_cli::client::ClientError::Rpc { code, .. } => {
-            assert_eq!(code, 404);
-        }
-        other => panic!("expected Rpc error, got: {other}"),
-    }
+    let lines = result["lines"].as_array().unwrap();
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0], "x");
+
+    // Session should now exist
+    assert!(mgr.has_session(&"auto-created".into()));
 
     let _ = std::fs::remove_file(&sock);
 }

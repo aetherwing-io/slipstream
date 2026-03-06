@@ -198,30 +198,28 @@ async fn batch_operations() {
 
 /// Error handling: bad session ID returns an error.
 #[tokio::test]
-async fn error_bad_session() {
+async fn implicit_open_on_read() {
     let (_server, mut client, sock, dir) = setup().await;
     let file = dir.path().join("f.txt");
     std::fs::write(&file, "x\n").unwrap();
 
-    let err = client
+    // Read with a nonexistent session — should auto-create and succeed
+    let result = client
         .request(
             "file.read",
             serde_json::json!({
-                "session_id": "nonexistent-session",
+                "session_id": "auto-created",
                 "path": file.to_str().unwrap(),
                 "start": 0,
                 "end": 1,
             }),
         )
         .await
-        .unwrap_err();
+        .unwrap();
 
-    match err {
-        slipstream_core::client::ClientError::Rpc { code, .. } => {
-            assert_eq!(code, 404);
-        }
-        other => panic!("expected Rpc error, got: {other}"),
-    }
+    let lines = result["lines"].as_array().unwrap();
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0], "x");
 
     let _ = std::fs::remove_file(&sock);
 }
