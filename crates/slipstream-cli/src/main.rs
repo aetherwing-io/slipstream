@@ -421,11 +421,13 @@ async fn run_exec(
     let paths: Vec<&str> = files.iter()
         .filter_map(|p| p.to_str())
         .collect();
-    // Always force native text handling in CLI exec mode.
-    // FCP handlers (fcp-python, fcp-rust) may not be running in all
-    // environments (Docker, CI) and their passthrough responses lack
-    // session_id, breaking all downstream operations.
-    let open_params = serde_json::json!({ "files": paths, "force_native": true });
+    // Force native text handling when ops are requested (str_replace needs
+    // a text session, not FCP passthrough). For reads, let FCP handle it —
+    // fcp-python/fcp-rust provide emergent LSP intelligence transparently.
+    let mut open_params = serde_json::json!({ "files": paths });
+    if ops.is_some() {
+        open_params["force_native"] = serde_json::json!(true);
+    }
     let open_result = client.request("session.open", open_params).await?;
 
     // Check for FCP passthrough — file is managed by an external handler.
@@ -444,14 +446,26 @@ async fn run_exec(
         return Ok(());
     }
 
-    let session_id = open_result["session_id"]
-        .as_str()
-        .ok_or_else(|| ClientError::Rpc {
-            code: -1,
-            message: "session.open did not return session_id".to_string(),
-            data: None,
-        })?
-        .to_string();
+    // If session.open didn't return session_id (FCP handler failed or returned
+    // unexpected format), retry with force_native to fall back to text mode.
+    let has_session_id = open_result["session_id"].is_string();
+    let (open_result, session_id) = if has_session_id {
+        let sid = open_result["session_id"].as_str().unwrap().to_string();
+        (open_result, sid)
+    } else {
+        let retry = client.request("session.open", serde_json::json!({
+            "files": paths, "force_native": true
+        })).await?;
+        let sid = retry["session_id"]
+            .as_str()
+            .ok_or_else(|| ClientError::Rpc {
+                code: -1,
+                message: "session.open failed (even with force_native fallback)".to_string(),
+                data: None,
+            })?
+            .to_string();
+        (retry, sid)
+    };
 
     output.insert("open".to_string(), open_result);
 
