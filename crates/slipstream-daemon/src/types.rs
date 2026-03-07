@@ -40,6 +40,10 @@ pub struct SessionOpenParams {
     /// name (adding new files). If absent, generates a short random ID.
     #[serde(default)]
     pub name: Option<String>,
+    /// Force native text handling, bypassing FCP handlers. Used when the
+    /// caller wants str_replace on files that would normally route to FCP.
+    #[serde(default)]
+    pub force_native: bool,
 }
 
 #[derive(Debug, Serialize)]

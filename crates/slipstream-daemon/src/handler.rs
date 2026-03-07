@@ -287,7 +287,7 @@ fn handle_session_open(
     // Early peek: if there's exactly one file and it has a live FCP handler,
     // route to FCP directly (transparent elevation).
     if let Ok(peek) = serde_json::from_value::<SessionOpenParams>(req.params.clone()) {
-        if peek.files.len() == 1 {
+        if peek.files.len() == 1 && !peek.force_native {
             let path = &peek.files[0];
             let ext = path
                 .extension()

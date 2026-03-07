@@ -421,7 +421,11 @@ async fn run_exec(
     let paths: Vec<&str> = files.iter()
         .filter_map(|p| p.to_str())
         .collect();
-    let open_result = client.request("session.open", serde_json::json!({ "files": paths })).await?;
+    let mut open_params = serde_json::json!({ "files": paths });
+    if ops.is_some() {
+        open_params["force_native"] = serde_json::json!(true);
+    }
+    let open_result = client.request("session.open", open_params).await?;
 
     // Check for FCP passthrough — file is managed by an external handler.
     // Only short-circuit if no ops were requested; otherwise fall through
