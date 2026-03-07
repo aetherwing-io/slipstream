@@ -423,15 +423,17 @@ async fn run_exec(
         .collect();
     let open_result = client.request("session.open", serde_json::json!({ "files": paths })).await?;
 
-    // Check for FCP passthrough — file is managed by an external handler
+    // Check for FCP passthrough — file is managed by an external handler.
+    // Only short-circuit if no ops were requested; otherwise fall through
+    // to text-mode handling so str_replace edits still work (BUG-007).
     use slipstream_cli::format;
-    if format::is_fcp_passthrough(&open_result) {
+    if ops.is_none() && format::is_fcp_passthrough(&open_result) {
         println!("{}", format::format_fcp_passthrough(&open_result));
         return Ok(());
     }
 
     // Check for external handler array (registry Full handlers)
-    if open_result.is_array() {
+    if ops.is_none() && open_result.is_array() {
         let text = serde_json::to_string_pretty(&open_result).unwrap_or_default();
         println!("{text}");
         return Ok(());

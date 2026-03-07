@@ -498,8 +498,9 @@ impl SlipstreamServer {
             Err(e) => return format_error(e),
         };
 
-        // If daemon routed to a live FCP handler, return its response verbatim
-        if format::is_fcp_passthrough(&open_result) {
+        // If daemon routed to a live FCP handler and no ops requested,
+        // return its response verbatim. With ops, fall through to text mode (BUG-007).
+        if ops.is_none() && format::is_fcp_passthrough(&open_result) {
             let text = format::format_fcp_passthrough(&open_result);
             return Ok(CallToolResult::success(vec![Content::text(text)]));
         }
