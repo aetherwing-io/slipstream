@@ -98,11 +98,20 @@ impl Client {
         self.write_buf.push(b'\n');
         self.writer.write_all(&self.write_buf).await?;
 
-        let line = self.reader.next_line().await?
-            .ok_or_else(|| ClientError::Io(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "daemon closed connection",
-            )))?;
+        let line = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            self.reader.next_line(),
+        )
+        .await
+        .map_err(|_| ClientError::Io(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "daemon request timed out (30s)",
+        )))?
+        ?
+        .ok_or_else(|| ClientError::Io(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "daemon closed connection",
+        )))?;
 
         let resp: serde_json::Value = serde_json::from_str(&line)?;
 
@@ -136,4 +145,44 @@ fn auto_start_daemon(socket_path: &Path) -> Result<(), ClientError> {
         )))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::UnixListener;
+
+    #[tokio::test]
+    async fn request_times_out_when_daemon_hangs() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("test.sock");
+
+        let listener = UnixListener::bind(&sock).unwrap();
+
+        // Accept connection but never send a response
+        let handle = tokio::spawn(async move {
+            let (_stream, _addr) = listener.accept().await.unwrap();
+            // Hold the connection open, never write back
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        });
+
+        let mut client = Client::connect(&sock, false).await.unwrap();
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(35),
+            client.request("test.ping", serde_json::json!({})),
+        )
+        .await
+        .expect("outer timeout should not fire");
+
+        match result {
+            Err(ClientError::Io(e)) => {
+                assert_eq!(e.kind(), std::io::ErrorKind::TimedOut);
+                assert!(e.to_string().contains("timed out"));
+            }
+            other => panic!("expected ClientError::Io(TimedOut), got: {:?}", other),
+        }
+
+        handle.abort();
+    }
 }
