@@ -421,10 +421,11 @@ async fn run_exec(
     let paths: Vec<&str> = files.iter()
         .filter_map(|p| p.to_str())
         .collect();
-    let mut open_params = serde_json::json!({ "files": paths });
-    if ops.is_some() {
-        open_params["force_native"] = serde_json::json!(true);
-    }
+    // Always force native text handling in CLI exec mode.
+    // FCP handlers (fcp-python, fcp-rust) may not be running in all
+    // environments (Docker, CI) and their passthrough responses lack
+    // session_id, breaking all downstream operations.
+    let open_params = serde_json::json!({ "files": paths, "force_native": true });
     let open_result = client.request("session.open", open_params).await?;
 
     // Check for FCP passthrough — file is managed by an external handler.
