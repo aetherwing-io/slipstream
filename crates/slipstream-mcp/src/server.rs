@@ -606,33 +606,31 @@ impl ServerHandler for SlipstreamServer {
 
 Edits are tracked, batched, and conflict-checked. Exact string matching — no regex escaping.
 
-## Read a file (ss_session — replaces Read)
-  ss_session("read src/main.rs")                    — full file
-  ss_session("read src/main.rs start:10 end:50")    — line range
-
-## Batch read multiple files (one call)
+## Batch operations (DEFAULT — always prefer this)
   ss(ops=[
     {"method":"file.read","path":"src/a.rs"},
-    {"method":"file.read","path":"src/b.rs"}
-  ])
-
-## Edit a file (ss — replaces Edit)
-  ss(path="src/main.rs", old_str="foo", new_str="bar")
-
-## Create a file (ss — replaces Write)
-  ss(path="src/new.py", new_str="import sys\nprint('hello')")
-
-## Batch edit multiple files (one call)
-  ss(ops=[
+    {"method":"file.read","path":"src/b.rs"},
     {"method":"file.str_replace","path":"src/a.rs","old_str":"x","new_str":"y"},
     {"method":"file.str_replace","path":"src/b.rs","old_str":"x","new_str":"y"}
   ])
-
-## Replace all occurrences
-  ss(path="src/main.rs", old_str="old_name", new_str="new_name", replace_all=true)
+  Reads and edits in ONE call. Always batch when touching 2+ files.
 
 ## Read then edit (single round-trip)
   ss(path="src/main.rs", old_str="foo", new_str="bar", read_all=true)
+  Returns file content AND applies the edit. No separate read needed.
+
+## Quick edit (single file shorthand)
+  ss(path="src/main.rs", old_str="foo", new_str="bar")
+
+## Quick read (single file shorthand)
+  ss_session("read src/main.rs")
+  ss_session("read src/main.rs start:10 end:50")
+
+## Create a file
+  ss(path="src/new.py", new_str="import sys\nprint('hello')")
+
+## Replace all occurrences
+  ss(path="src/main.rs", old_str="old_name", new_str="new_name", replace_all=true)
 
 ## Advanced: ss_help for session lifecycle, line-range writes, force flush"#.into()),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
