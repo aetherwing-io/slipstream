@@ -305,14 +305,26 @@ async fn run(
                 None => {
                     let path_str = path.to_str().unwrap_or_default();
                     let open_result = client.request("session.open", serde_json::json!({ "files": [path_str] })).await?;
-                    let sid = open_result["session_id"]
-                        .as_str()
-                        .ok_or_else(|| ClientError::Rpc {
-                            code: -1,
-                            message: "session.open did not return session_id".to_string(),
-                            data: None,
-                        })?
-                        .to_string();
+
+                    // If session.open returned a session_id, use it directly.
+                    // Otherwise the file was routed to an FCP handler (passthrough)
+                    // or the FCP spawn failed — retry with force_native to fall
+                    // back to text-mode handling (mirrors exec's fallback logic).
+                    let sid = if let Some(s) = open_result["session_id"].as_str() {
+                        s.to_string()
+                    } else {
+                        let retry = client.request("session.open", serde_json::json!({
+                            "files": [path_str], "force_native": true
+                        })).await?;
+                        retry["session_id"]
+                            .as_str()
+                            .ok_or_else(|| ClientError::Rpc {
+                                code: -1,
+                                message: "session.open failed (even with force_native fallback)".to_string(),
+                                data: None,
+                            })?
+                            .to_string()
+                    };
                     (sid, true)
                 }
             };
